@@ -39,6 +39,31 @@
           "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.microvm.declaredRunner;
         });
 
+      checks = aegis.forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in {
+          lock = pkgs.runCommand "aegis-lock-test" { } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-lock.sh} ${./helpers/lock.bash}
+            touch "$out"
+          '';
+
+          env = pkgs.runCommand "aegis-env-test" { } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-env.sh} ${./helpers/env.bash}
+            touch "$out"
+          '';
+
+          guest-system = pkgs.runCommand "aegis-guest-system-test" { } ''
+            set -o errexit -o nounset -o pipefail
+            test "${aegis.guestSystem "aarch64-darwin"}" = "aarch64-linux"
+            test "${aegis.guestSystem "aarch64-linux"}" = "aarch64-linux"
+            test "${aegis.guestSystem "x86_64-linux"}" = "x86_64-linux"
+            touch "$out"
+          '';
+        });
+
       nixosConfigurations = nixpkgs.lib.genAttrs
         (map (system: "aegis-vm-${system}") aegis.hostSystems)
         (name: aegis.mkVmConfig (nixpkgs.lib.removePrefix "aegis-vm-" name));
