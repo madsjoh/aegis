@@ -50,5 +50,8 @@ in
     ];
   };
 
+  networking.hostName = "aegis";
   networking.firewall.allowedTCPPorts = [ 4000 ];
+
+  services.getty.autologinUser = "agent";
 }
