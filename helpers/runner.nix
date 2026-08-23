@@ -72,13 +72,13 @@ pkgs.writeShellApplication {
     VM_PID=$!
 
     # 8. Wait for the OpenCode server to become reachable.
-    for _ in $(seq 1 120); do
+    for _ in $(seq 1 180); do
       if ! kill -0 "$VM_PID" 2>/dev/null; then
         echo "Error: The Aegis VM exited before OpenCode became available." >&2
         cat "$VM_LOG" >&2
         exit 1
       fi
-      if python3 -c "import socket; socket.create_connection(('localhost', $FREE_PORT), timeout=1).close()" 2>/dev/null; then
+      if python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:$FREE_PORT/', timeout=1)" 2>/dev/null; then
         break
       fi
       sleep 1
