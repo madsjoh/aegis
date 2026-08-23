@@ -1,6 +1,8 @@
-{ config, pkgs, ... }:
+{ config, lib, pkgs, ... }:
 
 {
+  system.stateVersion = lib.trivial.release;
+
   environment.sessionVariables = {
     GH_TOKEN = builtins.getEnv "GH_TOKEN";
     GITHUB_TOKEN = builtins.getEnv "GITHUB_TOKEN";
