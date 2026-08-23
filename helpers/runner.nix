@@ -16,7 +16,14 @@ pkgs.writeShellApplication {
       echo "Error: An Aegis VM is already active in this workspace." >&2
       exit 1
     fi
-    trap 'rm -rf "$LOCK_DIR"' EXIT
+    VM_PID=""
+    cleanup() {
+      if [ -n "$VM_PID" ]; then
+        kill "$VM_PID" 2>/dev/null || true
+      fi
+      rm -rf "$LOCK_DIR"
+    }
+    trap cleanup EXIT
 
     # 2. Prevent the agent and host from committing the lock file and local secrets.
     if [ -d "$HOST_PWD/.git" ]; then
@@ -56,7 +63,28 @@ pkgs.writeShellApplication {
     echo " Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
     echo " OpenCode listening on port: $FREE_PORT | Workspace:$HOST_PWD"
 
-    # 6. Launch the target MicroVM.
-    nix run "${flakeRef}#aegis-vm-${system}" --impure -- "$@"
+    # 6. Build the target MicroVM.
+    VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
+
+    # 7. Launch the MicroVM in the background.
+    VM_LOG="/tmp/aegis-vm-$VM_MOUNT_TAG.log"
+    "''${VM_PATH}/bin/microvm-run" "$@" &> "$VM_LOG" &
+    VM_PID=$!
+
+    # 8. Wait for the OpenCode server to become reachable.
+    for _ in $(seq 1 120); do
+      if ! kill -0 "$VM_PID" 2>/dev/null; then
+        echo "Error: The Aegis VM exited before OpenCode became available." >&2
+        cat "$VM_LOG" >&2
+        exit 1
+      fi
+      if python3 -c "import socket; socket.create_connection(('localhost', $FREE_PORT), timeout=1).close()" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+
+    # 9. Attach the host OpenCode client to the agent.
+    opencode attach "http://localhost:$FREE_PORT"
   '';
 }
