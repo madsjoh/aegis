@@ -3,6 +3,11 @@
 {
   system.stateVersion = lib.trivial.release;
 
+  # The home-manager activation requires nix-daemon, which the microvm module
+  # disables by default when the store is read-only.
+  systemd.services.nix-daemon.enable = true;
+  systemd.sockets.nix-daemon.enable = true;
+
   environment.sessionVariables = {
     GH_TOKEN = builtins.getEnv "GH_TOKEN";
     GITHUB_TOKEN = builtins.getEnv "GITHUB_TOKEN";
