@@ -30,7 +30,7 @@
         in {
           default = {
             type = "app";
-            program = "${aegis.mkRunner { inherit pkgs system; }}/bin/aegis";
+            program = "${aegis.mkRunner { inherit pkgs system; flakeRef = "path:${self.outPath}"; }}/bin/aegis";
           };
         });
 

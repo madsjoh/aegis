@@ -1,6 +1,6 @@
 { guestSystem }:
 
-{ pkgs, system }:
+{ pkgs, system, flakeRef }:
 
 pkgs.writeShellApplication {
   name = "aegis";
@@ -51,6 +51,6 @@ pkgs.writeShellApplication {
     echo " OpenCode listening on port: $FREE_PORT | Workspace:$HOST_PWD"
 
     # 6. Launch the target MicroVM.
-    nix run ".#aegis-vm-${system}" --impure -- "$@"
+    nix run "${flakeRef}#aegis-vm-${system}" --impure -- "$@"
   '';
 }
