@@ -9,29 +9,13 @@ pkgs.writeShellApplication {
     HOST_PWD="$(pwd)"
     LOCK_DIR="$HOST_PWD/.aegis.lock"
 
-    # 1. Acquire a directory lock (one VM per workspace).
-    acquired=false
-    for _ in 1 2; do
-      if mkdir "$LOCK_DIR" 2>/dev/null; then
-        acquired=true
-        break
-      fi
-      if [ -f "$LOCK_DIR/pid" ] && ! kill -0 "$(cat "$LOCK_DIR/pid")" 2>/dev/null; then
-        STALE="$LOCK_DIR.stale.$$"
-        if mv "$LOCK_DIR" "$STALE" 2>/dev/null; then
-          rm -rf "$STALE"
-        fi
-      else
-        break
-      fi
-    done
+    ${builtins.readFile ./lock.bash}
 
-    if [ "$acquired" != true ]; then
+    # 1. Acquire a directory lock (one VM per workspace).
+    if ! acquire_lock "$LOCK_DIR"; then
       echo "Error: An Aegis VM is already active in this workspace." >&2
       exit 1
     fi
-
-    echo "$$" > "$LOCK_DIR/pid"
     trap 'rm -rf "$LOCK_DIR"' EXIT
 
     # 2. Prevent the agent and host from committing the lock file and local secrets.
@@ -59,10 +43,9 @@ pkgs.writeShellApplication {
     export VM_MOUNT_TAG
     export VM_GIT_NAME="$HOST_GIT_NAME"
     export VM_GIT_EMAIL="$HOST_GIT_EMAIL"
-    GH_TOKEN="$(gh auth token 2>/dev/null || echo "$GH_TOKEN")"
-    export GH_TOKEN
-    export GITHUB_TOKEN="$GH_TOKEN"
-    export GEMINI_API_KEY="$GEMINI_API_KEY"
+    ${builtins.readFile ./env.bash}
+
+    forward_secrets "$(gh auth token 2>/dev/null || true)"
 
     echo " Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
     echo " OpenCode listening on port: $FREE_PORT | Workspace:$HOST_PWD"
