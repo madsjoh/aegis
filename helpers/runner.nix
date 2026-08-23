@@ -4,17 +4,32 @@
 
 pkgs.writeShellApplication {
   name = "aegis";
-  runtimeInputs = with pkgs; [ coreutils gh git gnugrep nix python3 util-linux ];
+  runtimeInputs = with pkgs; [ coreutils gh git gnugrep nix python3 ];
   text = ''
     HOST_PWD="$(pwd)"
-    LOCK_FILE="$HOST_PWD/.aegis.lock"
+    LOCK_DIR="$HOST_PWD/.aegis.lock"
 
-    # 1. Acquire directory lock (one VM per directory).
-    exec 9>"$LOCK_FILE"
-    if ! flock --nonblock 9 2>/dev/null; then
+    # 1. Acquire a directory lock (one VM per workspace).
+    acquired=false
+    for _ in 1 2; do
+      if mkdir "$LOCK_DIR" 2>/dev/null; then
+        acquired=true
+        break
+      fi
+      if [ -f "$LOCK_DIR/pid" ] && ! kill -0 "$(cat "$LOCK_DIR/pid")" 2>/dev/null; then
+        rm -rf "$LOCK_DIR"
+      else
+        break
+      fi
+    done
+
+    if [ "$acquired" != true ]; then
       echo "Error: An Aegis VM is already active in this workspace." >&2
       exit 1
     fi
+
+    echo "$$" > "$LOCK_DIR/pid"
+    trap 'rm -rf "$LOCK_DIR"' EXIT
 
     # 2. Prevent the agent and host from committing the lock file and local secrets.
     if [ -d "$HOST_PWD/.git" ]; then
