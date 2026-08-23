@@ -17,7 +17,10 @@ pkgs.writeShellApplication {
         break
       fi
       if [ -f "$LOCK_DIR/pid" ] && ! kill -0 "$(cat "$LOCK_DIR/pid")" 2>/dev/null; then
-        rm -rf "$LOCK_DIR"
+        STALE="$LOCK_DIR.stale.$$"
+        if mv "$LOCK_DIR" "$STALE" 2>/dev/null; then
+          rm -rf "$STALE"
+        fi
       else
         break
       fi
