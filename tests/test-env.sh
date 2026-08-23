@@ -10,22 +10,20 @@ failures=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
 
-# Unset secrets must not crash the runner and must not be forwarded.
-unset GEMINI_API_KEY GH_TOKEN GITHUB_TOKEN
+# Unset secrets must not crash the runner.
+unset GH_TOKEN GITHUB_TOKEN
 if forward_secrets "" \
-  && [ -z "${GEMINI_API_KEY:-}" ] \
+  && [ -z "${GH_TOKEN:-}" ] \
   && [ -z "${GITHUB_TOKEN:-}" ]; then
-  pass "unset secrets do not crash or forward"
+  pass "unset secrets do not crash"
 else
-  fail "unset secrets do not crash or forward"
+  fail "unset secrets do not crash"
 fi
 
 # Set secrets are forwarded.
-export GEMINI_API_KEY="gemini-key"
 export GH_TOKEN="gh-env-token"
 unset GITHUB_TOKEN
 if forward_secrets "" \
-  && [ "$GEMINI_API_KEY" = "gemini-key" ] \
   && [ "$GH_TOKEN" = "gh-env-token" ] \
   && [ "$GITHUB_TOKEN" = "gh-env-token" ]; then
   pass "set secrets are forwarded"

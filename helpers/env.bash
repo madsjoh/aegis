@@ -7,8 +7,4 @@ forward_secrets() {
 
   export GH_TOKEN="$gh_token"
   export GITHUB_TOKEN="$gh_token"
-
-  if [ -n "${GEMINI_API_KEY:-}" ]; then
-    export GEMINI_API_KEY
-  fi
 }

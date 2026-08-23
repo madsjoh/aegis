@@ -1,7 +1,10 @@
 { metis }:
 
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 
+let
+  opencodeAuthPath = builtins.getEnv "OPENCODE_AUTH_PATH";
+in
 {
   users.users.agent = {
     isNormalUser = true;
@@ -42,6 +45,10 @@
         bash
         fish
       ];
+
+      home.file.".local/share/opencode/auth.json" = lib.mkIf (opencodeAuthPath != "") {
+        text = builtins.readFile opencodeAuthPath;
+      };
 
       home.stateVersion = "24.05";
     };

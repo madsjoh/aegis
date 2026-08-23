@@ -47,6 +47,12 @@ pkgs.writeShellApplication {
 
     forward_secrets "$(gh auth token 2>/dev/null || true)"
 
+    # Forward the host OpenCode auth file.
+    OPENCODE_AUTH_PATH="$HOME/.local/share/opencode/auth.json"
+    if [ -f "$OPENCODE_AUTH_PATH" ]; then
+      export OPENCODE_AUTH_PATH
+    fi
+
     echo " Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
     echo " OpenCode listening on port: $FREE_PORT | Workspace:$HOST_PWD"
 

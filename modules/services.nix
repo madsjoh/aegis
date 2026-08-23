@@ -4,7 +4,6 @@
   environment.sessionVariables = {
     GH_TOKEN = builtins.getEnv "GH_TOKEN";
     GITHUB_TOKEN = builtins.getEnv "GITHUB_TOKEN";
-    GEMINI_API_KEY = builtins.getEnv "GEMINI_API_KEY";
     GIT_AUTHOR_NAME = builtins.getEnv "VM_GIT_NAME";
     GIT_AUTHOR_EMAIL = builtins.getEnv "VM_GIT_EMAIL";
     GIT_COMMITTER_NAME = builtins.getEnv "VM_GIT_NAME";
