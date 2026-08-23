@@ -24,8 +24,8 @@
 
       programs.git = {
         enable = true;
-        userName = builtins.getEnv "VM_GIT_NAME";
-        userEmail = builtins.getEnv "VM_GIT_EMAIL";
+        settings.user.name = builtins.getEnv "VM_GIT_NAME";
+        settings.user.email = builtins.getEnv "VM_GIT_EMAIL";
         ignores = [
           ".aegis.lock"
           ".opencode/"
