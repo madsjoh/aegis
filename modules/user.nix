@@ -20,9 +20,6 @@
 
       metis.opencode = {
         enable = true;
-        anthropicSkills.enable = true;
-        mattPocockSkills.enable = false;
-        vercelSkills.enable = false;
       };
 
       programs.git = {
