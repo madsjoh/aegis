@@ -1,16 +1,21 @@
 { nixpkgs, microvm, home-manager, metis }:
 
 let
-  supportedSystems = [ "aarch64-linux" "x86_64-linux" ];
+  hostSystems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
 
-  forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+  forAllSystems = nixpkgs.lib.genAttrs hostSystems;
 
-  mkRunner = import ./runner.nix;
+  guestSystem = system:
+    if nixpkgs.lib.hasSuffix "-darwin" system
+    then nixpkgs.lib.replaceStrings [ "-darwin" ] [ "-linux" ] system
+    else system;
+
+  mkRunner = import ./runner.nix { inherit guestSystem; };
 
   mkVmConfig = import ./guest.nix {
-    inherit nixpkgs microvm home-manager metis;
+    inherit nixpkgs microvm home-manager metis guestSystem;
   };
 in
 {
-  inherit supportedSystems forAllSystems mkRunner mkVmConfig;
+  inherit hostSystems forAllSystems guestSystem mkRunner mkVmConfig;
 }

@@ -1,3 +1,5 @@
+{ guestSystem }:
+
 { pkgs, system }:
 
 pkgs.writeShellApplication {
@@ -44,7 +46,7 @@ pkgs.writeShellApplication {
     export GITHUB_TOKEN="$GH_TOKEN"
     export GEMINI_API_KEY="$GEMINI_API_KEY"
 
-    echo " Aegis Active [Host: ${system} | Guest: ${system}]"
+    echo " Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
     echo " OpenCode listening on port: $FREE_PORT | Workspace:$HOST_PWD"
 
     # 6. Launch the target MicroVM.

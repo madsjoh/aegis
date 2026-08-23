@@ -1,9 +1,9 @@
-{ nixpkgs, microvm, home-manager, metis }:
+{ nixpkgs, microvm, home-manager, metis, guestSystem }:
 
-guestSystem:
+hostSystem:
 
 nixpkgs.lib.nixosSystem {
-  system = guestSystem;
+  system = guestSystem hostSystem;
 
   modules = [
     microvm.nixosModules.microvm
@@ -11,5 +11,8 @@ nixpkgs.lib.nixosSystem {
     (import ../modules/microvm.nix)
     (import ../modules/user.nix { inherit metis; })
     (import ../modules/services.nix)
+    ({ ... }: {
+      microvm.vmHostPackages = nixpkgs.legacyPackages.${hostSystem};
+    })
   ];
 }

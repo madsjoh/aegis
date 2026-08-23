@@ -40,7 +40,7 @@
         });
 
       nixosConfigurations = nixpkgs.lib.genAttrs
-        (map (system: "aegis-vm-${system}") aegis.supportedSystems)
+        (map (system: "aegis-vm-${system}") aegis.hostSystems)
         (name: aegis.mkVmConfig (nixpkgs.lib.removePrefix "aegis-vm-" name));
     };
 }
