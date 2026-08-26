@@ -30,10 +30,12 @@ let
       GIT_NAME_VALUE="$(resolve "$(jq -r '.git.name // empty' "$MERGED")" "''${VM_GIT_NAME:-}")"
       GIT_EMAIL_VALUE="$(resolve "$(jq -r '.git.email // empty' "$MERGED")" "''${VM_GIT_EMAIL:-}")"
       if [ -n "$GIT_NAME_VALUE" ]; then
-        git config --global user.name "$GIT_NAME_VALUE"
+        export GIT_AUTHOR_NAME="$GIT_NAME_VALUE"
+        export GIT_COMMITTER_NAME="$GIT_NAME_VALUE"
       fi
       if [ -n "$GIT_EMAIL_VALUE" ]; then
-        git config --global user.email "$GIT_EMAIL_VALUE"
+        export GIT_AUTHOR_EMAIL="$GIT_EMAIL_VALUE"
+        export GIT_COMMITTER_EMAIL="$GIT_EMAIL_VALUE"
       fi
 
       if jq -e '.opencode.auth' "$MERGED" >/dev/null 2>&1; then

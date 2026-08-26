@@ -1,4 +1,4 @@
-{ ... }:
+{ config, lib, ... }:
 
 let
   envInt = name: default:
@@ -34,6 +34,14 @@ let
       s = builtins.getEnv "HOST_CONFIG";
     in
     if s == "" then "/tmp/aegis-config" else s;
+
+  hostUid = envInt "VM_HOST_UID" 1000;
+
+  hostGid = envInt "VM_HOST_GID" 100;
+
+  virtiofsSocket = "/tmp/aegis-${mountTag}.sock";
+
+  virtiofsd = config.microvm.virtiofsd.package;
 in
 {
   boot.kernelParams = [ "systemd.getty_auto=0" ];
@@ -54,10 +62,16 @@ in
 
     shares = [
       {
-        proto = "9p";
+        proto = "virtiofs";
         tag = mountTag;
         source = workspaceSource;
         mountPoint = "/workspace";
+        socket = virtiofsSocket;
+        posixAcl = false;
+        extraArgs = [
+          "--translate-uid" "guest:1000:${toString hostUid}:1"
+          "--translate-gid" "guest:100:${toString hostGid}:1"
+        ];
       }
       {
         proto = "9p";
@@ -67,6 +81,20 @@ in
         readOnly = true;
       }
     ];
+
+    # Run virtiofsd directly as the invoking user. The stock runner wraps
+    # virtiofsd in supervisord as root, which cannot start from a non-root
+    # runner.
+    binScripts.virtiofsd-run = lib.mkForce ''
+      rm -f ${virtiofsSocket}
+      exec ${virtiofsd}/bin/virtiofsd \
+        --socket-path=${virtiofsSocket} \
+        --shared-dir=${workspaceSource} \
+        --thread-pool-size 4 \
+        --cache=auto \
+        --translate-uid guest:1000:${toString hostUid}:1 \
+        --translate-gid guest:100:${toString hostGid}:1
+    '';
   };
 
   networking.hostName = "aegis";

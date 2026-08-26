@@ -18,10 +18,14 @@ pkgs.writeShellApplication {
       exit 1
     fi
     VM_PID=""
+    VIRTIOFSD_PID=""
     cleanup() {
       if [ -n "$VM_PID" ]; then
         kill "$VM_PID" 2>/dev/null || true
         wait "$VM_PID" 2>/dev/null || true
+      fi
+      if [ -n "$VIRTIOFSD_PID" ]; then
+        kill "$VIRTIOFSD_PID" 2>/dev/null || true
       fi
       rm -rf "$LOCK_DIR"
     }
@@ -68,6 +72,9 @@ pkgs.writeShellApplication {
     export HOST_CONFIG="$USER_CONFIG_DIR"
     VM_MOUNT_TAG="ws_$(printf '%s' "$HOST_PWD" | md5sum | cut -c1-8)"
     export VM_MOUNT_TAG
+    VM_HOST_UID="$(id -u)"
+    VM_HOST_GID="$(id -g)"
+    export VM_HOST_UID VM_HOST_GID
     export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM VM_HYPERVISOR VM_ROWS VM_COLS
 
     echo "Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
@@ -76,9 +83,24 @@ pkgs.writeShellApplication {
     # 8. Build the target MicroVM.
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
-    # 9. Run the MicroVM in the foreground, attached to the console.
+    # 9. Start the virtiofs daemon, then run the MicroVM in the foreground.
+    "''${VM_PATH}/bin/virtiofsd-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG".log &
+    VIRTIOFSD_PID=$!
+    for _ in $(seq 1 50); do
+      if [ -S "/tmp/aegis-$VM_MOUNT_TAG.sock" ]; then
+        break
+      fi
+      if ! kill -0 "$VIRTIOFSD_PID" 2>/dev/null; then
+        echo "Error: The virtiofs daemon exited before becoming ready." >&2
+        cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG.log" >&2
+        exit 1
+      fi
+      sleep 0.2
+    done
+
     "''${VM_PATH}/bin/microvm-run" "$@" &
     VM_PID=$!
     wait "$VM_PID"
+    kill "$VIRTIOFSD_PID" 2>/dev/null || true
   '';
 }
