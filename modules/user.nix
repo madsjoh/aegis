@@ -2,9 +2,6 @@
 
 { pkgs, lib, ... }:
 
-let
-  opencodeAuthPath = builtins.getEnv "OPENCODE_AUTH_PATH";
-in
 {
   users.users.agent = {
     isNormalUser = true;
@@ -27,12 +24,10 @@ in
 
       programs.git = {
         enable = true;
-        settings.user.name = builtins.getEnv "VM_GIT_NAME";
-        settings.user.email = builtins.getEnv "VM_GIT_EMAIL";
         ignores = [
           ".aegis.lock"
+          ".aegis/"
           ".opencode/"
-          ".opencode-env"
         ];
       };
 
@@ -45,10 +40,6 @@ in
         bash
         fish
       ];
-
-      home.file.".local/share/opencode/auth.json" = lib.mkIf (opencodeAuthPath != "") {
-        text = builtins.readFile opencodeAuthPath;
-      };
 
       home.stateVersion = "24.05";
     };

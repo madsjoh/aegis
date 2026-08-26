@@ -1,12 +1,21 @@
 { ... }:
 
 let
-  hostPort = builtins.fromJSON (
+  envInt = name: default:
     let
-      s = builtins.getEnv "VM_HOST_PORT";
+      s = builtins.getEnv name;
     in
-    if s == "" then "0" else s
-  );
+    if s == "" then default else builtins.fromJSON s;
+
+  cpu = envInt "VM_CPU" 4;
+
+  mem = envInt "VM_MEM" 4096;
+
+  hypervisor =
+    let
+      s = builtins.getEnv "VM_HYPERVISOR";
+    in
+    if s == "" then "qemu" else s;
 
   mountTag =
     let
@@ -19,10 +28,21 @@ let
       s = builtins.getEnv "HOST_WORKSPACE";
     in
     if s == "" then "/tmp/aegis-workspace" else s;
+
+  configSource =
+    let
+      s = builtins.getEnv "HOST_CONFIG";
+    in
+    if s == "" then "/tmp/aegis-config" else s;
 in
 {
+  boot.kernelParams = [ "systemd.getty_auto=0" ];
+
   microvm = {
-    hypervisor = "qemu";
+    inherit hypervisor;
+    vcpu = cpu;
+    mem = mem;
+    writableStoreOverlay = "/nix/.rw-store";
 
     interfaces = [
       {
@@ -39,19 +59,15 @@ in
         source = workspaceSource;
         mountPoint = "/workspace";
       }
-    ];
-
-    forwardPorts = [
       {
-        from = "host";
-        host.port = hostPort;
-        guest.port = 4000;
+        proto = "9p";
+        tag = "aegis-config";
+        source = configSource;
+        mountPoint = "/aegis";
+        readOnly = true;
       }
     ];
   };
 
   networking.hostName = "aegis";
-  networking.firewall.allowedTCPPorts = [ 4000 ];
-
-  services.getty.autologinUser = "agent";
 }

@@ -54,9 +54,9 @@
             touch "$out"
           '';
 
-          env = pkgs.runCommand "aegis-env-test" { } ''
+          config = pkgs.runCommand "aegis-config-test" { buildInputs = [ pkgs.jq ]; } ''
             set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-env.sh} ${./helpers/env.bash}
+            bash ${./tests/test-config.sh} ${./helpers/config.bash}
             touch "$out"
           '';
 
