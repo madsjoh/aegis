@@ -21,7 +21,6 @@ let
       GITHUB_TOKEN_VALUE="$(jq -r '.github.token // empty' "$MERGED")"
       if [ -n "$GITHUB_TOKEN_VALUE" ]; then
         export GH_TOKEN="$GITHUB_TOKEN_VALUE"
-        export GITHUB_TOKEN="$GITHUB_TOKEN_VALUE"
       fi
 
       GIT_NAME_VALUE="$(resolve "$(jq -r '.git.name // empty' "$MERGED")" "''${VM_GIT_NAME:-}")"
