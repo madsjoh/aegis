@@ -54,7 +54,7 @@ restricted to trusted users.
 Initialize the user configuration:
 
 ```
-nix run .#init
+nix run github:madsjoh/aegis#init
 ```
 
 This detects OpenCode and the GitHub CLI and prompts to include their
