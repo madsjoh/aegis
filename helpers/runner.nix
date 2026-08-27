@@ -47,7 +47,7 @@ pkgs.writeShellApplication {
     fi
 
     # 3. Merge the user and workspace configuration, workspace wins.
-    USER_CONFIG_DIR="$HOME/.aegis"
+    USER_CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
     USER_CONFIG="$USER_CONFIG_DIR/config.json"
     WORKSPACE_CONFIG="$HOST_PWD/.aegis/config.json"
     mkdir -p "$USER_CONFIG_DIR"
