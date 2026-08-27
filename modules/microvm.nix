@@ -43,6 +43,13 @@ let
 
   virtiofsSocket = "/tmp/aegis-${mountTag}.sock";
 
+  configSocket = "/tmp/aegis-${mountTag}-config.sock";
+
+  translateArgs = [
+    "--translate-uid" "guest:1000:${toString hostUid}:1"
+    "--translate-gid" "guest:100:${toString hostGid}:1"
+  ];
+
   virtiofsd = config.microvm.virtiofsd.package;
 in
 {
@@ -75,17 +82,17 @@ in
         mountPoint = "/workspace";
         socket = virtiofsSocket;
         posixAcl = false;
-        extraArgs = [
-          "--translate-uid" "guest:1000:${toString hostUid}:1"
-          "--translate-gid" "guest:100:${toString hostGid}:1"
-        ];
+        extraArgs = translateArgs;
       }
       {
-        proto = "9p";
+        proto = "virtiofs";
         tag = "aegis-config";
         source = configSource;
         mountPoint = "/aegis";
+        socket = configSocket;
         readOnly = true;
+        posixAcl = false;
+        extraArgs = translateArgs;
       }
     ];
 
@@ -99,8 +106,15 @@ in
         --shared-dir=${workspaceSource} \
         --thread-pool-size 4 \
         --cache=auto \
-        --translate-uid guest:1000:${toString hostUid}:1 \
-        --translate-gid guest:100:${toString hostGid}:1
+        ${lib.concatStringsSep " " translateArgs}
+    '';
+    binScripts.virtiofsd-config-run = ''
+      rm -f ${configSocket}
+      exec ${virtiofsd}/bin/virtiofsd \
+        --socket-path=${configSocket} \
+        --shared-dir=${configSource} \
+        --readonly \
+        ${lib.concatStringsSep " " translateArgs}
     '';
   };
 

@@ -19,6 +19,7 @@ pkgs.writeShellApplication {
     fi
     VM_PID=""
     VIRTIOFSD_PID=""
+    VIRTIOFSD_CONFIG_PID=""
     SSH_KEY=""
     cleanup() {
       if [ -n "$VM_PID" ]; then
@@ -27,6 +28,9 @@ pkgs.writeShellApplication {
       fi
       if [ -n "$VIRTIOFSD_PID" ]; then
         kill "$VIRTIOFSD_PID" 2>/dev/null || true
+      fi
+      if [ -n "$VIRTIOFSD_CONFIG_PID" ]; then
+        kill "$VIRTIOFSD_CONFIG_PID" 2>/dev/null || true
       fi
       if [ -n "$SSH_KEY" ]; then
         rm -f "$SSH_KEY" "$SSH_KEY.pub"
@@ -87,16 +91,23 @@ pkgs.writeShellApplication {
     # 8. Build the target MicroVM.
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
-    # 9. Start the virtiofs daemon.
+    # 9. Start the virtiofs daemons.
     "''${VM_PATH}/bin/virtiofsd-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG".log &
     VIRTIOFSD_PID=$!
+    "''${VM_PATH}/bin/virtiofsd-config-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG"-config.log &
+    VIRTIOFSD_CONFIG_PID=$!
     for _ in $(seq 1 50); do
-      if [ -S "/tmp/aegis-$VM_MOUNT_TAG.sock" ]; then
+      if [ -S "/tmp/aegis-$VM_MOUNT_TAG.sock" ] && [ -S "/tmp/aegis-$VM_MOUNT_TAG-config.sock" ]; then
         break
       fi
       if ! kill -0 "$VIRTIOFSD_PID" 2>/dev/null; then
         echo "Error: The virtiofs daemon exited before becoming ready." >&2
         cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG.log" >&2
+        exit 1
+      fi
+      if ! kill -0 "$VIRTIOFSD_CONFIG_PID" 2>/dev/null; then
+        echo "Error: The config virtiofs daemon exited before becoming ready." >&2
+        cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG-config.log" >&2
         exit 1
       fi
       sleep 0.2
