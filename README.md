@@ -1,0 +1,124 @@
+# Aegis
+
+Aegis runs [OpenCode][opencode] inside an isolated QEMU MicroVM sandbox. The
+guest is built and configured as a NixOS system with [microvm.nix][microvm-nix]
+and [Metis][metis], so the agent works against your real workspace through a
+[virtiofs][virtiofs] mount while the host stays untouched.
+
+## How It Works
+
+The `aegis` runner performs these steps when you launch it in a workspace:
+
+1. Acquires a per workspace lock so only one VM runs at a time.
+2. Merges the user and workspace configuration files into one document.
+3. Builds a NixOS MicroVM whose CPU, memory, and hypervisor come from the
+   merged configuration.
+4. Shares the workspace and the configuration directory into the guest with
+   virtiofs.
+5. Boots the guest and waits for its SSH server over vsock.
+6. Attaches OpenCode, which runs inside the guest as the `agent` user.
+
+The guest mounts your workspace at `/workspace` and the configuration
+directory at `/aegis`. OpenCode therefore sees and edits the same files you do
+on the host, but every command it runs executes inside the VM.
+
+## Requirements
+
+- A [Nix][nix] installation with flakes enabled.
+- Hardware virtualization support. Linux requires KVM; macOS uses the built in
+  hypervisor framework.
+
+The flake builds for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`
+hosts. The guest is always Linux, so a Darwin host builds a Linux guest.
+
+## Usage
+
+Run Aegis from the root of your workspace:
+
+```
+nix run github:madsjoh/aegis
+```
+
+You can also run it from a local checkout:
+
+```
+nix run .
+```
+
+The runner prints the host and guest systems, then builds and boots the VM and
+attaches OpenCode. Pass additional arguments after `--` to forward them to the
+microvm runner.
+
+## Configuration
+
+Aegis reads two JSON files and merges them, with the workspace file taking
+precedence:
+
+- `~/.config/aegis/config.json` for user wide settings.
+- `.aegis/config.json` in the workspace for project specific settings.
+
+The following keys are supported:
+
+| Key              | Purpose                                                     | Default |
+| ---------------- | ----------------------------------------------------------- | ------- |
+| `vm.cpu`         | Number of virtual CPUs                                      | `4`     |
+| `vm.mem`         | Guest memory in MiB                                         | `4096`  |
+| `vm.hypervisor`  | MicroVM hypervisor passed to microvm.nix                    | `qemu`  |
+| `git.name`       | Git author and committer name                               | Host git |
+| `git.email`      | Git author and committer email                              | Host git |
+| `github.token`   | GitHub token exported as `GH_TOKEN` for the `gh` CLI        | None    |
+| `opencode.auth`  | OpenCode provider credentials written to the guest auth.json | None    |
+
+`git.name` and `git.email` fall back to your host Git configuration when they
+are not set. The `opencode.auth` value is an object whose contents are written
+to the guest OpenCode auth file, for example:
+
+```json
+{
+  "vm": {
+    "cpu": 4,
+    "mem": 8192
+  },
+  "git": {
+    "name": "Jane Doe",
+    "email": "jane@example.com"
+  },
+  "github": {
+    "token": "ghp_..."
+  },
+  "opencode": {
+    "auth": {
+      "anthropic": {
+        "type": "api",
+        "key": "sk-ant-..."
+      }
+    }
+  }
+}
+```
+
+The runner also appends `.aegis.lock` and `.aegis/` to the local Git exclude
+file so the agent and host never commit the lock or workspace secrets.
+
+## Development
+
+The helpers are plain Bash and Nix modules under `helpers/` and `modules/`.
+Run the test suite with:
+
+```
+nix flake check
+```
+
+The checks exercise the lock and configuration helpers plus the guest system
+mapping.
+
+## License
+
+[MIT][mit]
+
+[metis]: https://github.com/madsjoh/metis
+[microvm-nix]: https://github.com/astro/microvm.nix
+[mit]: https://opensource.org/license/mit
+[nix]: https://nixos.org/
+[opencode]: https://opencode.ai
+[virtiofs]: https://virtio-fs.gitlab.io/
