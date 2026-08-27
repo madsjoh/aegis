@@ -45,6 +45,15 @@ restricted to trusted users.
 
 ## Usage
 
+Initialize the user configuration:
+
+```
+nix run .#init
+```
+
+This detects OpenCode and the GitHub CLI and prompts to include their
+credentials in `~/.config/aegis/config.json`.
+
 Run Aegis from the root of your workspace:
 
 ```
