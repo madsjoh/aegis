@@ -133,6 +133,6 @@ pkgs.writeShellApplication {
     done
 
     # 12. Open opencode over SSH.
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null agent@vsock/"$VM_CID"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR agent@vsock/"$VM_CID"
   '';
 }
