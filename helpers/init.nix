@@ -8,7 +8,7 @@ pkgs.writeShellApplication {
 
     CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
     CONFIG_FILE="$CONFIG_DIR/config.json"
-    mkdir -p "$CONFIG_DIR"
+    mkdir --parents "$CONFIG_DIR"
 
     EXISTING="{}"
     if [ -f "$CONFIG_FILE" ]; then
@@ -22,7 +22,7 @@ pkgs.writeShellApplication {
     ADDITIONS="{}"
 
     if command -v opencode >/dev/null 2>&1; then
-      read -r -p "Include OpenCode auth? [y/N] " ANSWER
+      read -r -p "Include OpenCode auth? [y/N] " ANSWER || ANSWER=""
       case "$ANSWER" in
         y|Y)
           AUTH_FILE="''${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
@@ -42,7 +42,7 @@ pkgs.writeShellApplication {
     fi
 
     if command -v gh >/dev/null 2>&1; then
-      read -r -p "Include GitHub token? [y/N] " ANSWER
+      read -r -p "Include GitHub token? [y/N] " ANSWER || ANSWER=""
       case "$ANSWER" in
         y|Y)
           TOKEN="$(gh auth token 2>/dev/null || true)"
