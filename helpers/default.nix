@@ -11,11 +11,12 @@ let
     else system;
 
   mkRunner = import ./runner.nix { inherit guestSystem; };
+  mkInit = import ./init.nix;
 
   mkVmConfig = import ./guest.nix {
     inherit nixpkgs microvm home-manager metis guestSystem;
   };
 in
 {
-  inherit hostSystems forAllSystems guestSystem mkRunner mkVmConfig;
+  inherit hostSystems forAllSystems guestSystem mkRunner mkInit mkVmConfig;
 }
