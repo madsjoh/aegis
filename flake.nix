@@ -32,6 +32,10 @@
             type = "app";
             program = "${aegis.mkRunner { inherit pkgs system; flakeRef = "path:${self.outPath}"; }}/bin/aegis";
           };
+          init = {
+            type = "app";
+            program = "${aegis.mkInit { inherit pkgs; }}/bin/aegis-init";
+          };
         });
 
       packages = aegis.forAllSystems (system:
@@ -52,6 +56,12 @@
           config = pkgs.runCommand "aegis-config-test" { buildInputs = [ pkgs.jq ]; } ''
             set -o errexit -o nounset -o pipefail
             bash ${./tests/test-config.sh} ${./helpers/config.bash}
+            touch "$out"
+          '';
+
+          init = pkgs.runCommand "aegis-init-test" { buildInputs = [ pkgs.jq ]; } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-init.sh} ${./helpers/init.bash}
             touch "$out"
           '';
 
