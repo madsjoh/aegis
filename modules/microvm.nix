@@ -39,6 +39,8 @@ let
 
   hostGid = envInt "VM_HOST_GID" 100;
 
+  cid = envInt "VM_CID" 3;
+
   virtiofsSocket = "/tmp/aegis-${mountTag}.sock";
 
   virtiofsd = config.microvm.virtiofsd.package;
@@ -51,6 +53,11 @@ in
     vcpu = cpu;
     mem = mem;
     writableStoreOverlay = "/nix/.rw-store";
+
+    vsock = {
+      inherit cid;
+      ssh.enable = true;
+    };
 
     interfaces = [
       {

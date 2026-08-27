@@ -4,7 +4,7 @@
 
 pkgs.writeShellApplication {
   name = "aegis";
-  runtimeInputs = with pkgs; [ coreutils git gnugrep jq nix ];
+  runtimeInputs = with pkgs; [ coreutils git gnugrep jq nix openssh ];
   text = ''
     HOST_PWD="$(pwd)"
     LOCK_DIR="$HOST_PWD/.aegis.lock"
@@ -19,6 +19,7 @@ pkgs.writeShellApplication {
     fi
     VM_PID=""
     VIRTIOFSD_PID=""
+    SSH_KEY=""
     cleanup() {
       if [ -n "$VM_PID" ]; then
         kill "$VM_PID" 2>/dev/null || true
@@ -26,6 +27,9 @@ pkgs.writeShellApplication {
       fi
       if [ -n "$VIRTIOFSD_PID" ]; then
         kill "$VIRTIOFSD_PID" 2>/dev/null || true
+      fi
+      if [ -n "$SSH_KEY" ]; then
+        rm -f "$SSH_KEY" "$SSH_KEY.pub"
       fi
       rm -rf "$LOCK_DIR"
     }
@@ -60,22 +64,22 @@ pkgs.writeShellApplication {
     VM_GIT_NAME="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.name // empty')" "$HOST_GIT_NAME")"
     VM_GIT_EMAIL="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.email // empty')" "$HOST_GIT_EMAIL")"
 
-    # 6. Terminal geometry captured from the host.
-    VM_ROWS="24"
-    VM_COLS="80"
-    if SIZE="$(stty size 2>/dev/null)" && [ -n "$SIZE" ]; then
-      read -r VM_ROWS VM_COLS <<< "$SIZE"
-    fi
+    # 6. Workspace-derived identifiers, an ephemeral SSH key, and a vsock CID.
+    VM_MOUNT_TAG="ws_$(printf '%s' "$HOST_PWD" | md5sum | cut -c1-8)"
+    VM_CID=$(( 3 + $(printf '%d' "0x$(printf '%s' "$HOST_PWD" | md5sum | cut -c1-4)") % 1000 ))
+    SSH_KEY="/tmp/aegis-ssh-$VM_MOUNT_TAG"
+    rm -f "$SSH_KEY" "$SSH_KEY.pub"
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+    VM_SSH_PUBLIC_KEY="$(cat "$SSH_KEY.pub")"
 
     # 7. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
-    VM_MOUNT_TAG="ws_$(printf '%s' "$HOST_PWD" | md5sum | cut -c1-8)"
-    export VM_MOUNT_TAG
+    export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
-    export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM VM_HYPERVISOR VM_ROWS VM_COLS
+    export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM VM_HYPERVISOR
 
     echo "Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
     echo "Workspace: $HOST_PWD"
@@ -83,7 +87,7 @@ pkgs.writeShellApplication {
     # 8. Build the target MicroVM.
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
-    # 9. Start the virtiofs daemon, then run the MicroVM in the foreground.
+    # 9. Start the virtiofs daemon.
     "''${VM_PATH}/bin/virtiofsd-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG".log &
     VIRTIOFSD_PID=$!
     for _ in $(seq 1 50); do
@@ -98,9 +102,26 @@ pkgs.writeShellApplication {
       sleep 0.2
     done
 
-    "''${VM_PATH}/bin/microvm-run" "$@" &
+    # 10. Run the MicroVM in the background.
+    VM_LOG="/tmp/aegis-vm-$VM_MOUNT_TAG.log"
+    "''${VM_PATH}/bin/microvm-run" "$@" &> "$VM_LOG" &
     VM_PID=$!
-    wait "$VM_PID"
-    kill "$VIRTIOFSD_PID" 2>/dev/null || true
+
+    # 11. Wait for the guest SSH server over vsock.
+    SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes)
+    for _ in $(seq 1 120); do
+      if ssh "''${SSH_OPTS[@]}" root@vsock/"$VM_CID" true 2>/dev/null; then
+        break
+      fi
+      if ! kill -0 "$VM_PID" 2>/dev/null; then
+        echo "Error: The Aegis VM exited before SSH became available." >&2
+        cat "$VM_LOG" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+
+    # 12. Open opencode over SSH.
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null agent@vsock/"$VM_CID"
   '';
 }
