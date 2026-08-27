@@ -31,6 +31,18 @@ on the host, but every command it runs executes inside the VM.
 The flake builds for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`
 hosts. The guest is always Linux, so a Darwin host builds a Linux guest.
 
+To avoid building the MicroVM toolchain from source, configure the
+[microvm.nix][microvm-nix] binary cache on the host:
+
+```
+extra-substituters = https://microvm.cachix.org
+extra-trusted-public-keys = microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys=
+```
+
+Add these lines to your `nix.conf`, or through the `nix.settings` module option
+on NixOS. Aegis cannot set this itself because the public key option is
+restricted to trusted users.
+
 ## Usage
 
 Run Aegis from the root of your workspace:
