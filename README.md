@@ -26,10 +26,16 @@ on the host, but every command it runs executes inside the VM.
 
 - A [Nix][nix] installation with flakes enabled.
 - Hardware virtualization support. Linux requires KVM; macOS uses the built in
-  hypervisor framework.
+  hypervisor framework through QEMU.
 
 The flake builds for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`
-hosts. The guest is always Linux, so a Darwin host builds a Linux guest.
+hosts. The guest is always Linux, so a Darwin host builds a Linux guest and
+needs a Linux builder to do so, such as the nix-darwin `linux-builder` or a
+remote builder.
+
+On Linux the guest is reached over vsock and its shares use virtiofs. On macOS
+the shares use built in QEMU 9p instead, and SSH is reached over a forwarded
+TCP port, since virtiofsd and vsock are unavailable there.
 
 To avoid building the MicroVM toolchain from source, configure the
 [microvm.nix][microvm-nix] binary cache on the host:

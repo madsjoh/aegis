@@ -2,10 +2,15 @@
 
 { pkgs, system, flakeRef }:
 
+let
+  isDarwin = pkgs.lib.hasSuffix "-darwin" system;
+  isDarwinShell = if isDarwin then "true" else "false";
+in
 pkgs.writeShellApplication {
   name = "aegis";
   runtimeInputs = with pkgs; [ coreutils git gnugrep jq nix openssh ];
   text = ''
+    IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
     LOCK_DIR="$HOST_PWD/.aegis.lock"
 
@@ -68,9 +73,12 @@ pkgs.writeShellApplication {
     VM_GIT_NAME="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.name // empty')" "$HOST_GIT_NAME")"
     VM_GIT_EMAIL="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.email // empty')" "$HOST_GIT_EMAIL")"
 
-    # 6. Workspace-derived identifiers, an ephemeral SSH key, and a vsock CID.
+    # 6. Workspace-derived identifiers, an ephemeral SSH key, and the SSH
+    # transport details. Linux reaches the guest over vsock; macOS reaches it
+    # over TCP through a forwarded host port.
     VM_MOUNT_TAG="ws_$(printf '%s' "$HOST_PWD" | md5sum | cut -c1-8)"
     VM_CID=$(( 3 + $(printf '%d' "0x$(printf '%s' "$HOST_PWD" | md5sum | cut -c1-4)") % 1000 ))
+    VM_SSH_PORT=$(( 20000 + VM_CID ))
     SSH_KEY="/tmp/aegis-ssh-$VM_MOUNT_TAG"
     rm -f "$SSH_KEY" "$SSH_KEY.pub"
     ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
@@ -79,7 +87,7 @@ pkgs.writeShellApplication {
     # 7. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
-    export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY
+    export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY VM_SSH_PORT
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
@@ -91,37 +99,45 @@ pkgs.writeShellApplication {
     # 8. Build the target MicroVM.
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
-    # 9. Start the virtiofs daemons.
-    "''${VM_PATH}/bin/virtiofsd-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG".log &
-    VIRTIOFSD_PID=$!
-    "''${VM_PATH}/bin/virtiofsd-config-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG"-config.log &
-    VIRTIOFSD_CONFIG_PID=$!
-    for _ in $(seq 1 50); do
-      if [ -S "/tmp/aegis-$VM_MOUNT_TAG.sock" ] && [ -S "/tmp/aegis-$VM_MOUNT_TAG-config.sock" ]; then
-        break
-      fi
-      if ! kill -0 "$VIRTIOFSD_PID" 2>/dev/null; then
-        echo "Error: The virtiofs daemon exited before becoming ready." >&2
-        cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG.log" >&2
-        exit 1
-      fi
-      if ! kill -0 "$VIRTIOFSD_CONFIG_PID" 2>/dev/null; then
-        echo "Error: The config virtiofs daemon exited before becoming ready." >&2
-        cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG-config.log" >&2
-        exit 1
-      fi
-      sleep 0.2
-    done
+    # 9. Start the virtiofs daemons. macOS uses built-in 9p shares, which
+    # need no virtiofsd.
+    if [ "$IS_DARWIN" != "true" ]; then
+      "''${VM_PATH}/bin/virtiofsd-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG".log &
+      VIRTIOFSD_PID=$!
+      "''${VM_PATH}/bin/virtiofsd-config-run" &> /tmp/aegis-virtiofsd-"$VM_MOUNT_TAG"-config.log &
+      VIRTIOFSD_CONFIG_PID=$!
+      for _ in $(seq 1 50); do
+        if [ -S "/tmp/aegis-$VM_MOUNT_TAG.sock" ] && [ -S "/tmp/aegis-$VM_MOUNT_TAG-config.sock" ]; then
+          break
+        fi
+        if ! kill -0 "$VIRTIOFSD_PID" 2>/dev/null; then
+          echo "Error: The virtiofs daemon exited before becoming ready." >&2
+          cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG.log" >&2
+          exit 1
+        fi
+        if ! kill -0 "$VIRTIOFSD_CONFIG_PID" 2>/dev/null; then
+          echo "Error: The config virtiofs daemon exited before becoming ready." >&2
+          cat "/tmp/aegis-virtiofsd-$VM_MOUNT_TAG-config.log" >&2
+          exit 1
+        fi
+        sleep 0.2
+      done
+    fi
 
     # 10. Run the MicroVM in the background.
     VM_LOG="/tmp/aegis-vm-$VM_MOUNT_TAG.log"
     "''${VM_PATH}/bin/microvm-run" "$@" &> "$VM_LOG" &
     VM_PID=$!
 
-    # 11. Wait for the guest SSH server over vsock.
+    # 11. Wait for the guest SSH server.
     SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes)
+    if [ "$IS_DARWIN" = "true" ]; then
+      SSH_TARGET=(-p "$VM_SSH_PORT" agent@127.0.0.1)
+    else
+      SSH_TARGET=(agent@vsock/"$VM_CID")
+    fi
     for _ in $(seq 1 120); do
-      if ssh "''${SSH_OPTS[@]}" root@vsock/"$VM_CID" true 2>/dev/null; then
+      if ssh "''${SSH_OPTS[@]}" "''${SSH_TARGET[@]}" true 2>/dev/null; then
         break
       fi
       if ! kill -0 "$VM_PID" 2>/dev/null; then
@@ -133,6 +149,6 @@ pkgs.writeShellApplication {
     done
 
     # 12. Open opencode over SSH.
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR agent@vsock/"$VM_CID"
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}"
   '';
 }
