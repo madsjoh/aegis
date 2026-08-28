@@ -1,27 +1,14 @@
-{ guestSystem, builderContext, builderContextIdentity, builderVersion }:
+{ guestSystem }:
 
 { pkgs, system, flakeRef }:
 
 let
   isDarwin = pkgs.lib.hasSuffix "-darwin" system;
   isDarwinShell = if isDarwin then "true" else "false";
-  runtimeInputs = with pkgs; [ coreutils gawk git gnugrep jq nix openssh ]
-    ++ pkgs.lib.optionals isDarwin [ docker-client netcat ];
-  builderPreflight = pkgs.lib.optionalString isDarwin ''
-    ${builtins.readFile ./builder.bash}
-    ${builtins.readFile ./runner.bash}
-
-    AEGIS_BUILDER_CONTEXT="''${AEGIS_BUILDER_CONTEXT:-${builderContext}}"
-    AEGIS_BUILDER_CONTEXT_IDENTITY="''${AEGIS_BUILDER_CONTEXT_IDENTITY:-${builderContextIdentity}}"
-    AEGIS_BUILDER_VERSION="''${AEGIS_BUILDER_VERSION:-${builderVersion}}"
-    AEGIS_BUILDER_SETUP_COMMAND="nix run ${flakeRef}#builder-setup"
-    export AEGIS_BUILDER_CONTEXT AEGIS_BUILDER_CONTEXT_IDENTITY AEGIS_BUILDER_SETUP_COMMAND AEGIS_BUILDER_VERSION
-    runner_prepare_builder
-  '';
 in
 pkgs.writeShellApplication {
   name = "aegis";
-  inherit runtimeInputs;
+  runtimeInputs = with pkgs; [ coreutils git gnugrep jq nix openssh ];
   text = ''
     IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
@@ -110,7 +97,6 @@ pkgs.writeShellApplication {
     echo "Workspace: $HOST_PWD"
 
     # 8. Build the target MicroVM.
-    ${builderPreflight}
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
     # 9. Start the virtiofs daemons. macOS uses built-in 9p shares, which
