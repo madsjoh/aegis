@@ -30,8 +30,8 @@ on the host, but every command it runs executes inside the VM.
 
 The flake builds for `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`
 hosts. The guest is always Linux, so a Darwin host builds a Linux guest and
-needs a Linux builder to do so, such as the nix-darwin `linux-builder` or a
-remote builder.
+needs a Linux builder to do so. Aegis can manage this builder through Docker
+on Apple Silicon.
 
 On Linux the guest is reached over vsock and its shares use virtiofs. On macOS
 the shares use built in QEMU 9p instead, and SSH is reached over a forwarded
@@ -48,6 +48,133 @@ extra-trusted-public-keys = microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7y
 Add these lines to your `nix.conf`, or through the `nix.settings` module option
 on NixOS. Aegis cannot set this itself because the public key option is
 restricted to trusted users.
+
+## Docker Linux Builder
+
+### Prerequisites
+
+The managed builder supports Apple Silicon macOS only. Install and start
+Docker. The Docker command must be available and report an ARM64 architecture.
+
+Builder setup uses `sudo` to change system Nix configuration and reload the Nix
+daemon. Obtain approval from your corporate IT or security team before running
+it on a managed device. Docker containers, local port forwarding, and changes
+under `/etc/nix` may be restricted by company policy.
+
+### Setup
+
+Run the idempotent setup command initially and whenever you want to validate the
+builder configuration:
+
+```
+nix run github:madsjoh/aegis#builder-setup
+```
+
+From a local checkout, run `nix run .#builder-setup` instead. Setup requests
+administrator access, creates and verifies the builder, reloads the Nix daemon,
+and performs a fresh `aarch64-linux` test build through the remote builder.
+
+Setup manages these resources:
+
+* Docker image `aegis-builder`, labeled with the Aegis builder version and a
+  deterministic identity derived from the packaged Docker context.
+* Docker container `aegis-builder`, labeled with the same image identity and
+  the configured client public key fingerprint.
+* Docker volume `aegis-builder-nix`, mounted at `/nix` to persist the Nix store
+  and SSH host keys.
+* SSH forwarding from `127.0.0.1:31022` to port 22 in the container. SSH is not
+  exposed on other host interfaces.
+* User state in `~/.local/share/aegis/builder`, or
+  `$XDG_DATA_HOME/aegis/builder` when `XDG_DATA_HOME` is set. This directory
+  contains the client key pair and pinned builder host key.
+* `/etc/nix/aegis-machines`, which defines the `aarch64-linux` builder.
+* `/etc/nix/aegis.conf`, which enables the builder and its binary caches.
+* One active `!include /etc/nix/aegis.conf` line appended to
+  `/etc/nix/nix.conf` if an equivalent active include is absent. Setup preserves
+  every unrelated Nix setting.
+
+The host and builder use the standard `https://cache.nixos.org` cache and the
+`https://microvm.cachix.org` cache, including their trusted public keys. The
+builder image currently uses the mutable `alpine:3.22` base tag rather than an
+immutable digest. A later upstream tag update can therefore change a newly
+built image, which is a reproducibility and supply chain risk.
+
+### Automatic Operation
+
+On macOS, each Aegis launch requires exactly one active Aegis include and
+checks the exact managed settings, machine definition, image labels, container
+labels, pinned SSH host key, SSH authentication, and remote Nix daemon health
+before building the MicroVM. It creates the image and container when absent
+and starts a stopped container automatically. An unused image with stale
+identity labels is rebuilt. A running container is never silently replaced;
+identity, credential, and host key mismatches are fatal. Linux launches bypass
+all managed builder checks.
+
+### Troubleshooting
+
+* If Docker is unavailable, start Docker and run `docker info`.
+* If Docker reports an architecture other than ARM64, correct the Docker
+  environment architecture before retrying.
+* If port `31022` is occupied, stop the process using
+  `127.0.0.1:31022`, then rerun setup.
+* If setup reports an SSH host key mismatch, do not bypass it. Confirm that the
+  expected `aegis-builder` container and `aegis-builder-nix` volume are present.
+  If intentional replacement is required, follow the complete uninstall steps
+  before running setup again.
+* If credentials under `~/.local/share/aegis/builder` are missing while the
+  container remains, remove and recreate the container through the uninstall
+  and setup procedures. A newly generated client key cannot authenticate to an
+  existing container.
+* If setup reports credential drift, confirm that no build uses the container,
+  run `docker container rm --force aegis-builder`, and rerun setup. Setup does
+  not silently replace an existing container.
+* If setup reports duplicate active Aegis includes, remove the duplicates so
+  exactly one semantic `!include /etc/nix/aegis.conf` line remains.
+* For a stopped builder, rerun setup. Setup starts and validates the existing
+  container.
+* For a running but unhealthy builder, inspect it with
+  `docker container logs aegis-builder` and `docker container inspect
+  aegis-builder`. Remove only the container, then rerun setup to recreate and
+  validate it safely:
+
+  ```
+  docker container rm --force aegis-builder
+  nix run github:madsjoh/aegis#builder-setup
+  ```
+
+### Uninstall
+
+Back up `/etc/nix/nix.conf`, then remove every active semantic Aegis include
+while preserving comments and all unrelated settings. This portable command
+writes a replacement and installs it only if filtering succeeds:
+
+```
+sudo cp -p /etc/nix/nix.conf /etc/nix/nix.conf.aegis-backup
+temporary_file="$(mktemp /tmp/nix.conf.aegis-uninstall.XXXXXX)"
+if awk '!/^[[:space:]]*!include[[:space:]]+\/etc\/nix\/aegis[.]conf([[:space:]]*(#.*)?)?$/' /etc/nix/nix.conf > "$temporary_file"
+then
+  sudo install -m 0644 "$temporary_file" /etc/nix/nix.conf
+  rm "$temporary_file"
+else
+  rm "$temporary_file"
+  exit 1
+fi
+```
+
+Then remove the dedicated files, reload Nix, and remove the builder resources:
+
+```
+sudo rm /etc/nix/aegis.conf /etc/nix/aegis-machines
+sudo launchctl kickstart -k system/org.nixos.nix-daemon
+docker container rm --force aegis-builder
+docker image rm aegis-builder
+docker volume rm aegis-builder-nix
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/aegis/builder"
+```
+
+Do not delete or replace `/etc/nix/nix.conf`; it may contain unrelated Nix
+configuration. If Docker reports that the image or volume is in use, confirm
+that no other container uses it before removing that resource.
 
 ## Usage
 
