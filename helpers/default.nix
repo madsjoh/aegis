@@ -10,14 +10,13 @@ let
     then nixpkgs.lib.replaceStrings [ "-darwin" ] [ "-linux" ] system
     else system;
 
-  mkRunner = builderConfiguration: import ./runner.nix ({ inherit guestSystem; } // builderConfiguration);
+  mkRunner = import ./runner.nix { inherit guestSystem; };
   mkInit = import ./init.nix;
-  mkBuilderSetup = import ./builder-setup.nix;
 
   mkVmConfig = import ./guest.nix {
     inherit nixpkgs microvm home-manager metis guestSystem;
   };
 in
 {
-  inherit hostSystems forAllSystems guestSystem mkRunner mkInit mkBuilderSetup mkVmConfig;
+  inherit hostSystems forAllSystems guestSystem mkRunner mkInit mkVmConfig;
 }
