@@ -134,7 +134,8 @@ installed unless you opt in. A complete example:
 
 Per workspace state and the SSH key live outside the workspace under
 `~/.local/state/aegis/<workspace-id>` and `~/.local/share/aegis/<workspace-id>`,
-where `<workspace-id>` is the sha256 of the workspace path. The state directory
+where `<workspace-id>` is a 16 character prefix of the sha256 of the workspace
+path. The state directory
 holds the lock, virtiofsd sockets, and logs; the share directory holds the
 persisted SSH key. Override the base directories with `XDG_STATE_HOME` and
 `XDG_DATA_HOME`.

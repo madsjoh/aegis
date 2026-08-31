@@ -12,7 +12,7 @@ pkgs.writeShellApplication {
   text = ''
     IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
-    WORKSPACE_ID="$(printf '%s' "$HOST_PWD" | sha256sum | cut -d' ' -f1)"
+    WORKSPACE_ID="$(printf '%s' "$HOST_PWD" | sha256sum | cut -c1-16)"
     DATA_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/aegis/$WORKSPACE_ID"
     STATE_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/aegis/$WORKSPACE_ID"
     mkdir -p "$DATA_DIR" "$STATE_DIR"
@@ -103,7 +103,7 @@ pkgs.writeShellApplication {
       "''${VM_PATH}/bin/virtiofsd-config-run" &> "$STATE_DIR/virtiofsd-config.log" &
       VIRTIOFSD_CONFIG_PID=$!
       for _ in $(seq 1 50); do
-        if [ -S "$STATE_DIR/virtiofsd-workspace.sock" ] && [ -S "$STATE_DIR/virtiofsd-config.sock" ]; then
+        if [ -S "$STATE_DIR/fs.sock" ] && [ -S "$STATE_DIR/fsc.sock" ]; then
           break
         fi
         if ! kill -0 "$VIRTIOFSD_PID" 2>/dev/null; then
