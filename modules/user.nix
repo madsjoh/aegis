@@ -3,6 +3,12 @@
 { pkgs, lib, ... }:
 
 let
+  envBool = name: default:
+    let
+      value = builtins.getEnv name;
+    in
+    if value == "" then default else builtins.fromJSON value;
+
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
     runtimeInputs = with pkgs; [ coreutils git jq opencode ];
@@ -73,6 +79,9 @@ in
 
       metis.opencode = {
         enable = true;
+        skills.anthropic.enable = envBool "VM_SKILL_ANTHROPIC" false;
+        skills.mattpocock.enable = envBool "VM_SKILL_MATTPOCOCK" false;
+        skills.vercel.enable = envBool "VM_SKILL_VERCEL" false;
       };
 
       programs.git = {
