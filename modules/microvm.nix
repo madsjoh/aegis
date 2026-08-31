@@ -110,6 +110,7 @@ in
     vcpu = cpu;
     mem = mem;
     writableStoreOverlay = "/nix/.rw-store";
+    socket = "${stateDir}/qmp.sock";
 
     vsock = lib.mkIf (!isDarwinHost) {
       inherit cid;
