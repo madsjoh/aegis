@@ -125,15 +125,19 @@ pkgs.writeShellApplication {
     "''${VM_PATH}/bin/microvm-run" "$@" &> "$VM_LOG" &
     VM_PID=$!
 
-    # 11. Wait for the guest SSH server.
+    # 11. Wait for the guest SSH server. Probe as root, whose shell runs
+    # commands normally, rather than as agent, whose shell is the opencode
+    # wrapper and would launch opencode instead of `true`.
     SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes)
     if [ "$IS_DARWIN" = "true" ]; then
       SSH_TARGET=(-p "$VM_SSH_PORT" agent@127.0.0.1)
+      PROBE_TARGET=(-p "$VM_SSH_PORT" root@127.0.0.1)
     else
       SSH_TARGET=(agent@vsock/"$VM_CID")
+      PROBE_TARGET=(root@vsock/"$VM_CID")
     fi
     for _ in $(seq 1 120); do
-      if ssh "''${SSH_OPTS[@]}" "''${SSH_TARGET[@]}" true 2>/dev/null; then
+      if ssh "''${SSH_OPTS[@]}" "''${PROBE_TARGET[@]}" true 2>/dev/null; then
         break
       fi
       if ! kill -0 "$VM_PID" 2>/dev/null; then
