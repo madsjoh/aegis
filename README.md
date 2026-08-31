@@ -10,7 +10,7 @@ and [Metis][metis], so the agent works against your real workspace through a
 The `aegis` runner performs these steps when you launch it in a workspace:
 
 1. Acquires a per workspace lock so only one VM runs at a time.
-2. Merges the user and workspace configuration files into one document.
+2. Loads the user configuration file.
 3. Builds a NixOS MicroVM whose CPU, memory, and hypervisor come from the
    merged configuration.
 4. Shares the workspace and the configuration directory into the guest with
@@ -78,11 +78,9 @@ microvm runner.
 
 ## Configuration
 
-Aegis reads two JSON files and merges them, with the workspace file taking
-precedence:
+Aegis reads a single user wide JSON file:
 
 - `~/.config/aegis/config.json` for user wide settings.
-- `.aegis/config.json` in the workspace for project specific settings.
 
 The following keys are supported:
 
@@ -134,8 +132,12 @@ installed unless you opt in. A complete example:
 }
 ```
 
-The runner also appends `.aegis.lock` and `.aegis/` to the local Git exclude
-file so the agent and host never commit the lock or workspace secrets.
+Per workspace state and the SSH key live outside the workspace under
+`~/.local/state/aegis/<workspace-id>` and `~/.local/share/aegis/<workspace-id>`,
+where `<workspace-id>` is the sha256 of the workspace path. The state directory
+holds the lock, virtiofsd sockets, and logs; the share directory holds the
+persisted SSH key. Override the base directories with `XDG_STATE_HOME` and
+`XDG_DATA_HOME`.
 
 ## Development
 

@@ -43,9 +43,15 @@ let
 
   sshHostPort = envInt "VM_SSH_PORT" 2222;
 
-  virtiofsSocket = "/tmp/aegis-${mountTag}.sock";
+  stateDir =
+    let
+      s = builtins.getEnv "HOST_STATE_DIR";
+    in
+    if s == "" then "/tmp/aegis-state" else s;
 
-  configSocket = "/tmp/aegis-${mountTag}-config.sock";
+  virtiofsSocket = "${stateDir}/virtiofsd-workspace.sock";
+
+  configSocket = "${stateDir}/virtiofsd-config.sock";
 
   translateArgs = [
     "--translate-uid" "guest:1000:${toString hostUid}:1"
