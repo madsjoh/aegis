@@ -95,10 +95,15 @@ The following keys are supported:
 | `git.email`      | Git author and committer email                              | Host git |
 | `github.token`   | GitHub token exported as `GH_TOKEN` for the `gh` CLI        | None    |
 | `opencode.auth`  | OpenCode provider credentials written to the guest auth.json | None    |
+| `skills.anthropic`  | Enable the Anthropic leaf skills                          | `false` |
+| `skills.mattpocock` | Enable the Matt Pocock leaf skills                        | `false` |
+| `skills.vercel`     | Enable the Vercel leaf skills                             | `false` |
 
 `git.name` and `git.email` fall back to your host Git configuration when they
 are not set. The `opencode.auth` value is an object whose contents are written
-to the guest OpenCode auth file, for example:
+to the guest OpenCode auth file. The `skills` keys enable the Metis leaf skills
+inside the guest and all default to `false`, so only the superpowers spine is
+installed unless you opt in. A complete example:
 
 ```json
 {
@@ -120,6 +125,11 @@ to the guest OpenCode auth file, for example:
         "key": "sk-ant-..."
       }
     }
+  },
+  "skills": {
+    "anthropic": false,
+    "mattpocock": false,
+    "vercel": true
   }
 }
 ```
