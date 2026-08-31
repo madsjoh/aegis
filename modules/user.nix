@@ -16,13 +16,12 @@ let
       ${builtins.readFile ../helpers/config.bash}
 
       USER_CONFIG="/aegis/config.json"
-      WORKSPACE_CONFIG="/workspace/.aegis/config.json"
 
       MERGED="$(mktemp)"
       cleanup_merged() { rm -f "$MERGED"; }
       trap cleanup_merged EXIT
 
-      merge_json "$USER_CONFIG" "$WORKSPACE_CONFIG" > "$MERGED"
+      merge_json "$USER_CONFIG" > "$MERGED"
 
       GITHUB_TOKEN_VALUE="$(jq -r '.github.token // empty' "$MERGED")"
       if [ -n "$GITHUB_TOKEN_VALUE" ]; then
@@ -87,8 +86,6 @@ in
       programs.git = {
         enable = true;
         ignores = [
-          ".aegis.lock"
-          ".aegis/"
           ".opencode/"
         ];
       };
