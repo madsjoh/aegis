@@ -49,9 +49,9 @@ let
     in
     if s == "" then "/tmp/aegis-state" else s;
 
-  virtiofsSocket = "${stateDir}/virtiofsd-workspace.sock";
+  virtiofsSocket = "${stateDir}/fs.sock";
 
-  configSocket = "${stateDir}/virtiofsd-config.sock";
+  configSocket = "${stateDir}/fsc.sock";
 
   translateArgs = [
     "--translate-uid" "guest:1000:${toString hostUid}:1"
