@@ -10,6 +10,8 @@ in
 {
   boot.kernelParams = [ "systemd.getty_auto=0" ];
 
+  environment.enableAllTerminfo = true;
+
   networking.hostName = "aegis";
 
   virtualisation = {
