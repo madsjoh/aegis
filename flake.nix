@@ -1,13 +1,8 @@
 {
-  description = "Aegis: Isolated QEMU MicroVM Sandbox for OpenCode configured via Metis";
+  description = "Aegis: Isolated VM Sandbox for OpenCode configured via Metis";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-
-    microvm = {
-      url = "github:astro/microvm.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
 
     home-manager = {
       url = "github:nix-community/home-manager";
@@ -20,9 +15,9 @@
     };
   };
 
-  outputs = { self, nixpkgs, microvm, home-manager, metis }:
+  outputs = { self, nixpkgs, home-manager, metis }:
     let
-      aegis = import ./helpers { inherit nixpkgs microvm home-manager metis; };
+      aegis = import ./helpers { inherit nixpkgs home-manager metis; };
     in {
       apps = aegis.forAllSystems (system:
         let
@@ -40,7 +35,7 @@
 
       packages = aegis.forAllSystems (system:
         {
-          "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.microvm.declaredRunner;
+          "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.system.build.vm;
         });
 
       checks = aegis.forAllSystems (system:
