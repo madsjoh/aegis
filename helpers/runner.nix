@@ -3,12 +3,20 @@
 { pkgs, system, flakeRef }:
 
 let
-  isDarwin = pkgs.lib.hasSuffix "-darwin" system;
+  lib = pkgs.lib;
+  isDarwin = lib.hasSuffix "-darwin" system;
   isDarwinShell = if isDarwin then "true" else "false";
 in
 pkgs.writeShellApplication {
   name = "aegis";
-  runtimeInputs = with pkgs; [ coreutils git gnugrep jq nix openssh ];
+  runtimeInputs = with pkgs; [
+    coreutils
+    git
+    gnugrep
+    jq
+    nix
+    openssh
+  ] ++ lib.optionals (!isDarwin) [ virtiofsd ];
   text = ''
     IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
@@ -44,16 +52,26 @@ pkgs.writeShellApplication {
     }
     trap cleanup EXIT INT TERM HUP
 
-    # 2. Load the user configuration.
+    # 2. Snapshot the user configuration into the workspace state on first run.
+    # The guest mounts this writable copy, so edits never touch the global file.
     USER_CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
     USER_CONFIG="$USER_CONFIG_DIR/config.json"
-    mkdir -p "$USER_CONFIG_DIR"
-    MERGED="$(merge_json "$USER_CONFIG")"
+    WORKSPACE_CONFIG_DIR="$STATE_DIR/.config/aegis"
+    WORKSPACE_CONFIG="$WORKSPACE_CONFIG_DIR/config.json"
+    if [ ! -f "$WORKSPACE_CONFIG" ]; then
+      mkdir -p "$WORKSPACE_CONFIG_DIR"
+      if [ -f "$USER_CONFIG" ]; then
+        cp "$USER_CONFIG" "$WORKSPACE_CONFIG"
+      else
+        printf '{}\n' > "$WORKSPACE_CONFIG"
+      fi
+      chmod 600 "$WORKSPACE_CONFIG"
+    fi
+    MERGED="$(merge_json "$WORKSPACE_CONFIG")"
 
     # 3. VM resource settings with defaults.
     VM_CPU="$(printf '%s' "$MERGED" | jq -r '.vm.cpu // 4')"
     VM_MEM="$(printf '%s' "$MERGED" | jq -r '.vm.mem // 4096')"
-    VM_HYPERVISOR="$(printf '%s' "$MERGED" | jq -r '.vm.hypervisor // "qemu"')"
 
     # 4. Metis leaf skills, disabled by default.
     VM_SKILL_ANTHROPIC="$(printf '%s' "$MERGED" | jq -r '.skills.anthropic // false')"
@@ -80,27 +98,42 @@ pkgs.writeShellApplication {
 
     # 7. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
-    export HOST_CONFIG="$USER_CONFIG_DIR"
+    export HOST_CONFIG="$WORKSPACE_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
     export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY VM_SSH_PORT
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
-    export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM VM_HYPERVISOR
+    export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM
     export VM_SKILL_ANTHROPIC VM_SKILL_MATTPOCOCK VM_SKILL_VERCEL
 
     echo "Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
     echo "Workspace: $HOST_PWD"
 
-    # 8. Build the target MicroVM.
+    # 8. Build the target VM.
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
-    # 9. Start the virtiofs daemons. macOS uses built-in 9p shares, which
+    # 9. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
     # need no virtiofsd.
     if [ "$IS_DARWIN" != "true" ]; then
-      "''${VM_PATH}/bin/virtiofsd-run" &> "$STATE_DIR/virtiofsd-workspace.log" &
+      rm -f "$STATE_DIR/fs.sock" "$STATE_DIR/fsc.sock"
+      virtiofsd \
+        --socket-path="$STATE_DIR/fs.sock" \
+        --shared-dir="$HOST_WORKSPACE" \
+        --thread-pool-size 4 \
+        --cache=auto \
+        --translate-uid "guest:1000:$VM_HOST_UID:1" \
+        --translate-gid "guest:100:$VM_HOST_GID:1" \
+        &> "$STATE_DIR/virtiofsd-workspace.log" &
       VIRTIOFSD_PID=$!
-      "''${VM_PATH}/bin/virtiofsd-config-run" &> "$STATE_DIR/virtiofsd-config.log" &
+      virtiofsd \
+        --socket-path="$STATE_DIR/fsc.sock" \
+        --shared-dir="$HOST_CONFIG" \
+        --thread-pool-size 4 \
+        --cache=auto \
+        --translate-uid "guest:1000:$VM_HOST_UID:1" \
+        --translate-gid "guest:100:$VM_HOST_GID:1" \
+        &> "$STATE_DIR/virtiofsd-config.log" &
       VIRTIOFSD_CONFIG_PID=$!
       for _ in $(seq 1 50); do
         if [ -S "$STATE_DIR/fs.sock" ] && [ -S "$STATE_DIR/fsc.sock" ]; then
@@ -120,9 +153,13 @@ pkgs.writeShellApplication {
       done
     fi
 
-    # 10. Run the MicroVM in the background.
+    # 10. Run the VM in the background.
     VM_LOG="$STATE_DIR/vm.log"
-    "''${VM_PATH}/bin/microvm-run" "$@" &> "$VM_LOG" &
+    if [ "$IS_DARWIN" = "true" ]; then
+      VZVM_STATE_DIR="$STATE_DIR" "''${VM_PATH}/bin/run-aegis-vm" "$@" &> "$VM_LOG" &
+    else
+      "''${VM_PATH}/bin/run-aegis-vm" "$@" &> "$VM_LOG" &
+    fi
     VM_PID=$!
 
     # 11. Wait for the guest SSH server. Probe as root, whose shell runs
