@@ -185,7 +185,8 @@ pkgs.writeShellApplication {
       sleep 1
     done
 
-    # 12. Open opencode over SSH.
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}"
+    # 12. Open opencode over SSH. Force pty allocation so the guest renderer
+    # runs against a real terminal instead of a pipe.
+    ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}"
   '';
 }
