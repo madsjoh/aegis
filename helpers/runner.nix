@@ -185,7 +185,9 @@ pkgs.writeShellApplication {
       sleep 1
     done
 
-    # 12. Open opencode over SSH.
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}"
+    # 12. Open opencode over SSH. Run the opencode wrapper as a command rather
+    # than as the login shell; a command session does not set the SSH
+    # environment, so the renderer detects the terminal like it does locally.
+    ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}" "exec /run/current-system/sw/bin/opencode-shell"
   '';
 }

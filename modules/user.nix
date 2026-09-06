@@ -28,8 +28,8 @@ let
         export GH_TOKEN="$GITHUB_TOKEN_VALUE"
       fi
 
-      GIT_NAME_VALUE="$(resolve "$(jq -r '.git.name // empty' "$MERGED")" "''${VM_GIT_NAME:-}")"
-      GIT_EMAIL_VALUE="$(resolve "$(jq -r '.git.email // empty' "$MERGED")" "''${VM_GIT_EMAIL:-}")"
+      GIT_NAME_VALUE="$(resolve "$(jq -r '.git.name // empty' "$MERGED")" "${builtins.getEnv "VM_GIT_NAME"}")"
+      GIT_EMAIL_VALUE="$(resolve "$(jq -r '.git.email // empty' "$MERGED")" "${builtins.getEnv "VM_GIT_EMAIL"}")"
       if [ -n "$GIT_NAME_VALUE" ]; then
         export GIT_AUTHOR_NAME="$GIT_NAME_VALUE"
         export GIT_COMMITTER_NAME="$GIT_NAME_VALUE"
@@ -53,11 +53,13 @@ let
   };
 in
 {
+  environment.systemPackages = [ opencodeShell ];
+
   users.users.agent = {
     isNormalUser = true;
     extraGroups = [ "wheel" ];
     home = "/home/agent";
-    shell = lib.getExe opencodeShell;
+    shell = lib.getExe pkgs.bash;
     openssh.authorizedKeys.keys = [
       (builtins.getEnv "VM_SSH_PUBLIC_KEY")
     ];
