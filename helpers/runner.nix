@@ -111,11 +111,13 @@ pkgs.writeShellApplication {
     echo "Workspace: $HOST_PWD"
 
     # 8. Build the target VM.
+    echo "Building the guest VM..."
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
 
     # 9. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
     # need no virtiofsd.
     if [ "$IS_DARWIN" != "true" ]; then
+      echo "Starting the virtiofs daemons..."
       rm -f "$STATE_DIR/fs.sock" "$STATE_DIR/fsc.sock"
       virtiofsd \
         --socket-path="$STATE_DIR/fs.sock" \
@@ -155,6 +157,7 @@ pkgs.writeShellApplication {
 
     # 10. Run the VM in the background.
     VM_LOG="$STATE_DIR/vm.log"
+    echo "Booting the guest..."
     if [ "$IS_DARWIN" = "true" ]; then
       VZVM_STATE_DIR="$STATE_DIR" "''${VM_PATH}/bin/run-aegis-vm" "$@" &> "$VM_LOG" &
     else
@@ -162,9 +165,7 @@ pkgs.writeShellApplication {
     fi
     VM_PID=$!
 
-    # 11. Wait for the guest SSH server. Probe as root, whose shell runs
-    # commands normally, rather than as agent, whose shell is the opencode
-    # wrapper and would launch opencode instead of `true`.
+    # 11. Wait for the guest SSH server.
     SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes)
     if [ "$IS_DARWIN" = "true" ]; then
       SSH_TARGET=(-p "$VM_SSH_PORT" agent@127.0.0.1)
@@ -173,6 +174,7 @@ pkgs.writeShellApplication {
       SSH_TARGET=(agent@vsock/"$VM_CID")
       PROBE_TARGET=(root@vsock/"$VM_CID")
     fi
+    echo "Waiting for the guest SSH server..."
     for _ in $(seq 1 120); do
       if ssh "''${SSH_OPTS[@]}" "''${PROBE_TARGET[@]}" true 2>/dev/null; then
         break
@@ -185,9 +187,7 @@ pkgs.writeShellApplication {
       sleep 1
     done
 
-    # 12. Open opencode over SSH. Run the opencode wrapper as a command rather
-    # than as the login shell; a command session does not set the SSH
-    # environment, so the renderer detects the terminal like it does locally.
+    # 12. Attach OpenCode over SSH.
     ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}" "exec /run/current-system/sw/bin/opencode-shell"
   '';
 }
