@@ -42,6 +42,7 @@ let
       if jq -e '.opencode.auth' "$MERGED" >/dev/null 2>&1; then
         mkdir -p "$HOME/.local/share/opencode"
         jq '.opencode.auth' "$MERGED" > "$HOME/.local/share/opencode/auth.json"
+        chmod 600 "$HOME/.local/share/opencode/auth.json"
       fi
 
       rm -f "$MERGED"
