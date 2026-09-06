@@ -28,13 +28,28 @@ in
         source = "\"$HOST_CONFIG\"";
         target = "/aegis";
       };
+
+      opencode-config = {
+        source = "\"$HOST_STATE_DIR/opencode/config\"";
+        target = "/home/agent/.config/opencode";
+      };
+
+      opencode-state = {
+        source = "\"$HOST_STATE_DIR/opencode/state\"";
+        target = "/home/agent/.local/state/opencode";
+      };
+
+      opencode-share = {
+        source = "\"$HOST_STATE_DIR/opencode/share\"";
+        target = "/home/agent/.local/share/opencode";
+      };
     };
 
     vz = {
       rosetta.enable = true;
       diskImage = null;
       console = "file";
-      consoleLog = "${stateDir}/console.log";
+      consoleLog = "${stateDir}/run/console.log";
       forwardPorts = [
         {
           host.address = "127.0.0.1";

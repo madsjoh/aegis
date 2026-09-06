@@ -23,8 +23,12 @@ pkgs.writeShellApplication {
     WORKSPACE_ID="$(printf '%s' "$HOST_PWD" | sha256sum | cut -c1-16)"
     DATA_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/aegis/$WORKSPACE_ID"
     STATE_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/aegis/$WORKSPACE_ID"
-    mkdir -p "$DATA_DIR" "$STATE_DIR"
-    LOCK_DIR="$STATE_DIR/lock"
+    RUN_DIR="$STATE_DIR/run"
+    OPENCODE_CONFIG_DIR="$STATE_DIR/opencode/config"
+    OPENCODE_STATE_DIR="$STATE_DIR/opencode/state"
+    OPENCODE_SHARE_DIR="$STATE_DIR/opencode/share"
+    mkdir -p "$DATA_DIR" "$RUN_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_STATE_DIR" "$OPENCODE_SHARE_DIR"
+    LOCK_DIR="$RUN_DIR/lock"
 
     ${builtins.readFile ./lock.bash}
     ${builtins.readFile ./config.bash}
@@ -35,19 +39,15 @@ pkgs.writeShellApplication {
       exit 1
     fi
     VM_PID=""
-    VIRTIOFSD_PID=""
-    VIRTIOFSD_CONFIG_PID=""
+    VIRTIOFSD_PIDS=""
     cleanup() {
       if [ -n "$VM_PID" ]; then
         kill "$VM_PID" 2>/dev/null || true
         wait "$VM_PID" 2>/dev/null || true
       fi
-      if [ -n "$VIRTIOFSD_PID" ]; then
-        kill "$VIRTIOFSD_PID" 2>/dev/null || true
-      fi
-      if [ -n "$VIRTIOFSD_CONFIG_PID" ]; then
-        kill "$VIRTIOFSD_CONFIG_PID" 2>/dev/null || true
-      fi
+      for pid in $VIRTIOFSD_PIDS; do
+        kill "$pid" 2>/dev/null || true
+      done
       rm -rf "$LOCK_DIR"
     }
     trap cleanup EXIT INT TERM HUP
@@ -118,45 +118,59 @@ pkgs.writeShellApplication {
     # need no virtiofsd.
     if [ "$IS_DARWIN" != "true" ]; then
       echo "Starting the virtiofs daemons..."
-      rm -f "$STATE_DIR/fs.sock" "$STATE_DIR/fsc.sock"
-      virtiofsd \
-        --socket-path="$STATE_DIR/fs.sock" \
-        --shared-dir="$HOST_WORKSPACE" \
-        --thread-pool-size 4 \
-        --cache=auto \
-        --translate-uid "guest:1000:$VM_HOST_UID:1" \
-        --translate-gid "guest:100:$VM_HOST_GID:1" \
-        &> "$STATE_DIR/virtiofsd-workspace.log" &
-      VIRTIOFSD_PID=$!
-      virtiofsd \
-        --socket-path="$STATE_DIR/fsc.sock" \
-        --shared-dir="$HOST_CONFIG" \
-        --thread-pool-size 4 \
-        --cache=auto \
-        --translate-uid "guest:1000:$VM_HOST_UID:1" \
-        --translate-gid "guest:100:$VM_HOST_GID:1" \
-        &> "$STATE_DIR/virtiofsd-config.log" &
-      VIRTIOFSD_CONFIG_PID=$!
+      start_virtiofsd() {
+        local socket="$1" shared_dir="$2" log="$3"
+        virtiofsd \
+          --socket-path="$socket" \
+          --shared-dir="$shared_dir" \
+          --thread-pool-size 4 \
+          --cache=auto \
+          --translate-uid "guest:1000:$VM_HOST_UID:1" \
+          --translate-gid "guest:100:$VM_HOST_GID:1" \
+          &> "$log" &
+        VIRTIOFSD_PIDS="$VIRTIOFSD_PIDS $!"
+      }
+      VIRTIOFSD_SOCKETS=(
+        "$RUN_DIR/workspace.sock"
+        "$RUN_DIR/config.sock"
+        "$RUN_DIR/opencode-config.sock"
+        "$RUN_DIR/opencode-state.sock"
+        "$RUN_DIR/opencode-share.sock"
+      )
+      for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do
+        rm -f "$socket"
+      done
+      start_virtiofsd "$RUN_DIR/workspace.sock" "$HOST_WORKSPACE" "$RUN_DIR/virtiofsd-workspace.log"
+      start_virtiofsd "$RUN_DIR/config.sock" "$WORKSPACE_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
+      start_virtiofsd "$RUN_DIR/opencode-config.sock" "$OPENCODE_CONFIG_DIR" "$RUN_DIR/virtiofsd-opencode-config.log"
+      start_virtiofsd "$RUN_DIR/opencode-state.sock" "$OPENCODE_STATE_DIR" "$RUN_DIR/virtiofsd-opencode-state.log"
+      start_virtiofsd "$RUN_DIR/opencode-share.sock" "$OPENCODE_SHARE_DIR" "$RUN_DIR/virtiofsd-opencode-share.log"
       for _ in $(seq 1 50); do
-        if [ -S "$STATE_DIR/fs.sock" ] && [ -S "$STATE_DIR/fsc.sock" ]; then
+        ready=true
+        for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do
+          if [ ! -S "$socket" ]; then
+            ready=false
+            break
+          fi
+        done
+        if [ "$ready" = true ]; then
           break
         fi
-        if ! kill -0 "$VIRTIOFSD_PID" 2>/dev/null; then
-          echo "Error: The virtiofs daemon exited before becoming ready." >&2
-          cat "$STATE_DIR/virtiofsd-workspace.log" >&2
-          exit 1
-        fi
-        if ! kill -0 "$VIRTIOFSD_CONFIG_PID" 2>/dev/null; then
-          echo "Error: The config virtiofs daemon exited before becoming ready." >&2
-          cat "$STATE_DIR/virtiofsd-config.log" >&2
-          exit 1
-        fi
+        for pid in $VIRTIOFSD_PIDS; do
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Error: A virtiofs daemon exited before becoming ready." >&2
+            for log in "$RUN_DIR"/virtiofsd-*.log; do
+              cat "$log" >&2
+            done
+            exit 1
+          fi
+        done
         sleep 0.2
       done
     fi
 
     # 10. Run the VM in the background.
-    VM_LOG="$STATE_DIR/vm.log"
+    VM_LOG="$RUN_DIR/vm.log"
     echo "Booting the guest..."
     if [ "$IS_DARWIN" = "true" ]; then
       VZVM_STATE_DIR="$STATE_DIR" "''${VM_PATH}/bin/run-aegis-vm" "$@" &> "$VM_LOG" &

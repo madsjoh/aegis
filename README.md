@@ -137,9 +137,14 @@ installed unless you opt in. A complete example:
 Per workspace state and the SSH key live outside the workspace under
 `~/.local/state/aegis/<workspace-id>` and `~/.local/share/aegis/<workspace-id>`,
 where `<workspace-id>` is a 16 character prefix of the sha256 of the workspace
-path. The state directory holds the lock, the configuration snapshot, the
-virtiofsd sockets, and the logs; the share directory holds the persisted SSH
-key. Override the base directories with `XDG_STATE_HOME` and `XDG_DATA_HOME`.
+path. The state directory holds the configuration snapshot, an `opencode/`
+directory, and a `run/` directory. The `opencode/` subdirectories
+(`config`, `state`, and `share`) are mounted into the guest under
+`.config/opencode`, `.local/state/opencode`, and `.local/share/opencode` so
+configuration, sessions, and data persist between runs. The `run/` directory
+holds the lock, the virtiofsd sockets, and the logs. The share directory holds
+the persisted SSH key. Override the base directories with `XDG_STATE_HOME` and
+`XDG_DATA_HOME`.
 
 ## Development
 
