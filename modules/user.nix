@@ -9,6 +9,15 @@ let
     in
     if value == "" then default else builtins.fromJSON value;
 
+  envStrOrNull = name:
+    let
+      value = builtins.getEnv name;
+    in
+    if value == "" then null else value;
+
+  gitUserName = envStrOrNull "VM_GIT_NAME";
+  gitUserEmail = envStrOrNull "VM_GIT_EMAIL";
+
   maven = pkgs.maven.override { jdk_headless = pkgs.temurin-bin-26; };
 
   opencodeShell = pkgs.writeShellApplication {
@@ -120,6 +129,12 @@ in
 
       programs.git = {
         enable = true;
+        settings = lib.optionalAttrs (gitUserName != null || gitUserEmail != null) {
+          user = lib.filterAttrs (_: value: value != null) {
+            name = gitUserName;
+            email = gitUserEmail;
+          };
+        };
         ignores = [
           ".opencode/"
         ];
