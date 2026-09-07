@@ -56,6 +56,22 @@ in
 {
   environment.systemPackages = [ opencodeShell ];
 
+  # The virtiofs mounts create their parent directories as root. Reclaim them
+  # and prepare the Home Manager directories before activation.
+  systemd.services.aegis-agent-home = {
+    description = "Prepare the agent home directory for Home Manager activation";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "home-manager-agent.service" ];
+    after = [ "local-fs.target" ];
+    serviceConfig.Type = "oneshot";
+    script = ''
+      mkdir -p /home/agent/.config /home/agent/.local /home/agent/.local/share /home/agent/.local/state
+      chown agent:users /home/agent/.config /home/agent/.local /home/agent/.local/share /home/agent/.local/state
+      mkdir -p /home/agent/.local/state/nix/profiles /home/agent/.local/state/home-manager/gcroots
+      chown -R agent:users /home/agent/.local/state/nix /home/agent/.local/state/home-manager
+    '';
+  };
+
   users.users.agent = {
     isNormalUser = true;
     extraGroups = [ "wheel" ];
@@ -81,6 +97,16 @@ in
 
       metis.opencode = {
         enable = true;
+        config = {
+          lsp = {
+            jdtls.command = [ "jdtls" ];
+            csharp.command = [ "csharp-ls" ];
+            fish = {
+              command = [ "fish-lsp" "start" ];
+              extensions = [ ".fish" ];
+            };
+          };
+        };
         skills.anthropic.enable = envBool "VM_SKILL_ANTHROPIC" false;
         skills.mattpocock.enable = envBool "VM_SKILL_MATTPOCOCK" false;
         skills.vercel.enable = envBool "VM_SKILL_VERCEL" false;
