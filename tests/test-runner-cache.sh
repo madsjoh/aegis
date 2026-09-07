@@ -285,6 +285,7 @@ assert_runner_line() {
 assert_runner_line 'DATA_DIR="'"''"'${XDG_DATA_HOME:-$HOME/.local/share}/aegis"' 'runner uses the host wide Aegis data root'
 assert_runner_line 'CACHE_DIR="'"''"'${XDG_CACHE_HOME:-$HOME/.cache}/aegis/vzvm"' 'runner uses the shared macOS image cache'
 assert_runner_line 'STATE_DIR="'"''"'${XDG_STATE_HOME:-$HOME/.local/state}/aegis/$WORKSPACE_ID"' 'runner retains workspace state isolation'
+assert_runner_line 'VZVM_STATE_DIR="$STATE_DIR"' 'runner keeps vzvm state in the workspace state directory'
 assert_runner_line 'mkdir -p "$DATA_DIR" "$CACHE_DIR" "$RUN_DIR" "$OPENCODE_STATE_DIR" "$OPENCODE_SHARE_DIR"' 'runner creates shared and workspace directories'
 assert_runner_line 'SSH_KEY="$DATA_DIR/ssh_host_ed25519"' 'runner stores the SSH key under the Aegis data root'
 assert_runner_line '${builtins.readFile ./store-cache.bash}' 'runner loads the store cache helpers'
@@ -292,9 +293,9 @@ assert_runner_line '${builtins.readFile ./ssh-key.bash}' 'runner loads the SSH k
 assert_runner_line '${builtins.readFile ./runner-lifecycle.bash}' 'runner loads the lifecycle helper'
 assert_runner_line 'ensure_ssh_key "$SSH_KEY"' 'runner safely creates the host wide SSH key'
 assert_runner_line 'wait_for_image_lock "$IMAGE_LOCK_FILE" IMAGE_LOCK_DESCRIPTOR' 'runner waits for the image lock'
-assert_runner_line 'VZVM_STATE_DIR="$CACHE_DIR"' 'runner launches macOS with the shared cache directory'
+assert_runner_line 'link_shared_store_images "$STATE_DIR" "$CACHE_DIR"' 'runner links shared images into workspace state before launch'
 assert_runner_line 'wait_for_guest_start "$VM_PID" "$VM_LOG"' 'runner waits for guest startup'
-assert_runner_line 'remove_legacy_store_images "$STATE_DIR" "$CACHE_DIR"' 'runner removes legacy images after startup'
+assert_runner_line 'publish_store_images "$STATE_DIR" "$CACHE_DIR"' 'runner publishes newly built images to the shared cache'
 assert_runner_line 'acquire_lock "$WORKSPACE_LOCK_FILE" WORKSPACE_LOCK_DESCRIPTOR' 'runner acquires the workspace lock by descriptor'
 assert_runner_line 'close_lock_descriptors "$IMAGE_LOCK_DESCRIPTOR" "$WORKSPACE_LOCK_DESCRIPTOR"' 'VM child closes its inherited lock descriptors'
 assert_runner_line 'close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"' 'runner children close inherited workspace lock descriptors'
@@ -310,19 +311,19 @@ else
 fi
 
 lock_line="$(grep -nF 'wait_for_image_lock "$IMAGE_LOCK_FILE" IMAGE_LOCK_DESCRIPTOR' "$RUNNER_NIX" | cut -d: -f1 || true)"
-launch_line="$(grep -nF 'VZVM_STATE_DIR="$CACHE_DIR"' "$RUNNER_NIX" | cut -d: -f1 || true)"
+launch_line="$(grep -nF 'VZVM_STATE_DIR="$STATE_DIR"' "$RUNNER_NIX" | cut -d: -f1 || true)"
 start_line="$(grep -nF 'wait_for_guest_start "$VM_PID" "$VM_LOG"' "$RUNNER_NIX" | cut -d: -f1 || true)"
-legacy_line="$(grep -nF 'remove_legacy_store_images "$STATE_DIR" "$CACHE_DIR"' "$RUNNER_NIX" | cut -d: -f1 || true)"
+publish_line="$(grep -nF 'publish_store_images "$STATE_DIR" "$CACHE_DIR"' "$RUNNER_NIX" | cut -d: -f1 || true)"
 if [ -n "$lock_line" ] \
   && [ -n "$launch_line" ] \
   && [ -n "$start_line" ] \
-  && [ -n "$legacy_line" ] \
+  && [ -n "$publish_line" ] \
   && [ "$lock_line" -lt "$launch_line" ] \
   && [ "$launch_line" -lt "$start_line" ] \
-  && [ "$start_line" -lt "$legacy_line" ]; then
-  pass "runner serializes macOS launch through guest startup and legacy cleanup"
+  && [ "$start_line" -lt "$publish_line" ]; then
+  pass "runner serializes macOS launch through guest startup and image publication"
 else
-  fail "runner serializes macOS launch through guest startup and legacy cleanup"
+  fail "runner serializes macOS launch through guest startup and image publication"
 fi
 
 if [ "$failures" -eq 0 ]; then
