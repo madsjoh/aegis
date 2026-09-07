@@ -31,6 +31,7 @@ pkgs.writeShellApplication {
 
     ${builtins.readFile ./lock.bash}
     ${builtins.readFile ./config.bash}
+    ${builtins.readFile ./wait-for-ssh.bash}
 
     # 1. Acquire a directory lock, one VM per workspace.
     if ! acquire_lock "$LOCK_DIR"; then
@@ -186,17 +187,7 @@ pkgs.writeShellApplication {
       PROBE_TARGET=(root@vsock/"$VM_CID")
     fi
     echo "Waiting for the guest SSH server..."
-    for _ in $(seq 1 120); do
-      if ssh "''${SSH_OPTS[@]}" "''${PROBE_TARGET[@]}" true 2>/dev/null; then
-        break
-      fi
-      if ! kill -0 "$VM_PID" 2>/dev/null; then
-        echo "Error: The Aegis VM exited before SSH became available." >&2
-        cat "$VM_LOG" >&2
-        exit 1
-      fi
-      sleep 1
-    done
+    wait_for_ssh
 
     # 12. Attach OpenCode over SSH.
     ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}" "exec /run/current-system/sw/bin/opencode-shell"

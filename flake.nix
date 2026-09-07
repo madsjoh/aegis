@@ -60,11 +60,19 @@
             touch "$out"
           '';
 
+          wait-for-ssh = pkgs.runCommand "aegis-wait-for-ssh-test" { } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-wait-for-ssh.sh} ${./helpers/wait-for-ssh.bash}
+            touch "$out"
+          '';
+
           guest-system = pkgs.runCommand "aegis-guest-system-test" { } ''
             set -o errexit -o nounset -o pipefail
             test "${aegis.guestSystem "aarch64-darwin"}" = "aarch64-linux"
             test "${aegis.guestSystem "aarch64-linux"}" = "aarch64-linux"
             test "${aegis.guestSystem "x86_64-linux"}" = "x86_64-linux"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-darwin.config.services.openssh.enable}" = "1"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-linux.config.services.openssh.enable}" = "1"
             touch "$out"
           '';
         });

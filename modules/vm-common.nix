@@ -14,6 +14,8 @@ in
 
   networking.hostName = "aegis";
 
+  services.openssh.enable = true;
+
   virtualisation = {
     cores = envInt "VM_CPU" 4;
     memorySize = envInt "VM_MEM" 4096;
