@@ -1,27 +1,19 @@
 acquire_lock() {
-  LOCK_DIR="${1:?lock directory}"
+  local lock_file="${1:?lock file}"
+  local descriptor_variable="${2:?descriptor variable}"
+  local acquired_descriptor
 
-  local acquired=false
-  local stale=""
-  for _ in 1 2; do
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-      acquired=true
-      break
-    fi
-    if [ -f "$LOCK_DIR/pid" ] && ! kill -0 "$(cat "$LOCK_DIR/pid")" 2>/dev/null; then
-      stale="$LOCK_DIR.stale.$$"
-      if mv "$LOCK_DIR" "$stale" 2>/dev/null; then
-        rm -rf "$stale"
-      fi
-    else
-      break
-    fi
-  done
-
-  if [ "$acquired" != true ]; then
+  exec {acquired_descriptor}>"$lock_file"
+  if ! flock --exclusive --nonblock "$acquired_descriptor"; then
+    exec {acquired_descriptor}>&-
     return 1
   fi
+  printf -v "$descriptor_variable" '%s' "$acquired_descriptor"
+}
 
-  echo "$$" > "$LOCK_DIR/pid"
-  return 0
+release_lock() {
+  local descriptor="${1:?lock descriptor}"
+
+  flock --unlock "$descriptor"
+  exec {descriptor}>&-
 }
