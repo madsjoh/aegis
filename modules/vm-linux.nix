@@ -16,14 +16,12 @@ let
   stateDir = envStr "HOST_STATE_DIR" "/tmp/aegis-state";
   mountTag = envStr "VM_MOUNT_TAG" "workspace";
   configTag = "aegis-config";
-  opencodeConfigTag = "opencode-config";
   opencodeStateTag = "opencode-state";
   opencodeShareTag = "opencode-share";
   cid = envInt "VM_CID" 3;
 
   workspaceSocket = "${stateDir}/run/workspace.sock";
   configSocket = "${stateDir}/run/config.sock";
-  opencodeConfigSocket = "${stateDir}/run/opencode-config.sock";
   opencodeStateSocket = "${stateDir}/run/opencode-state.sock";
   opencodeShareSocket = "${stateDir}/run/opencode-share.sock";
 in
@@ -44,8 +42,6 @@ in
       "-device vhost-user-fs-pci,chardev=char-${mountTag},tag=${mountTag}"
       "-chardev socket,id=char-${configTag},path=${configSocket}"
       "-device vhost-user-fs-pci,chardev=char-${configTag},tag=${configTag}"
-      "-chardev socket,id=char-${opencodeConfigTag},path=${opencodeConfigSocket}"
-      "-device vhost-user-fs-pci,chardev=char-${opencodeConfigTag},tag=${opencodeConfigTag}"
       "-chardev socket,id=char-${opencodeStateTag},path=${opencodeStateSocket}"
       "-device vhost-user-fs-pci,chardev=char-${opencodeStateTag},tag=${opencodeStateTag}"
       "-chardev socket,id=char-${opencodeShareTag},path=${opencodeShareSocket}"
@@ -62,12 +58,6 @@ in
 
   virtualisation.fileSystems."/aegis" = {
     device = configTag;
-    fsType = "virtiofs";
-    options = [ "x-systemd.requires=modprobe@virtiofs.service" ];
-  };
-
-  virtualisation.fileSystems."/home/agent/.config/opencode" = {
-    device = opencodeConfigTag;
     fsType = "virtiofs";
     options = [ "x-systemd.requires=modprobe@virtiofs.service" ];
   };

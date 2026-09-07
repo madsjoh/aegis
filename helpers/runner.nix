@@ -24,10 +24,9 @@ pkgs.writeShellApplication {
     DATA_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/aegis/$WORKSPACE_ID"
     STATE_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/aegis/$WORKSPACE_ID"
     RUN_DIR="$STATE_DIR/run"
-    OPENCODE_CONFIG_DIR="$STATE_DIR/opencode/config"
     OPENCODE_STATE_DIR="$STATE_DIR/opencode/state"
     OPENCODE_SHARE_DIR="$STATE_DIR/opencode/share"
-    mkdir -p "$DATA_DIR" "$RUN_DIR" "$OPENCODE_CONFIG_DIR" "$OPENCODE_STATE_DIR" "$OPENCODE_SHARE_DIR"
+    mkdir -p "$DATA_DIR" "$RUN_DIR" "$OPENCODE_STATE_DIR" "$OPENCODE_SHARE_DIR"
     LOCK_DIR="$RUN_DIR/lock"
 
     ${builtins.readFile ./lock.bash}
@@ -133,7 +132,6 @@ pkgs.writeShellApplication {
       VIRTIOFSD_SOCKETS=(
         "$RUN_DIR/workspace.sock"
         "$RUN_DIR/config.sock"
-        "$RUN_DIR/opencode-config.sock"
         "$RUN_DIR/opencode-state.sock"
         "$RUN_DIR/opencode-share.sock"
       )
@@ -142,7 +140,6 @@ pkgs.writeShellApplication {
       done
       start_virtiofsd "$RUN_DIR/workspace.sock" "$HOST_WORKSPACE" "$RUN_DIR/virtiofsd-workspace.log"
       start_virtiofsd "$RUN_DIR/config.sock" "$WORKSPACE_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
-      start_virtiofsd "$RUN_DIR/opencode-config.sock" "$OPENCODE_CONFIG_DIR" "$RUN_DIR/virtiofsd-opencode-config.log"
       start_virtiofsd "$RUN_DIR/opencode-state.sock" "$OPENCODE_STATE_DIR" "$RUN_DIR/virtiofsd-opencode-state.log"
       start_virtiofsd "$RUN_DIR/opencode-share.sock" "$OPENCODE_SHARE_DIR" "$RUN_DIR/virtiofsd-opencode-share.log"
       for _ in $(seq 1 50); do
