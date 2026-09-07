@@ -9,6 +9,8 @@ let
     in
     if value == "" then default else builtins.fromJSON value;
 
+  maven = pkgs.maven.override { jdk_headless = pkgs.temurin-bin-26; };
+
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
     runtimeInputs = with pkgs; [ coreutils git jq opencode ];
@@ -127,7 +129,19 @@ in
         fd
         bash
         fish
+        temurin-bin-26
+        maven
+        python3
+        go
+        cargo
+        rustc
+        rustfmt
+        clippy
       ];
+
+      home.sessionVariables = {
+        JAVA_HOME = "${pkgs.temurin-bin-26.home}";
+      };
 
       home.stateVersion = "24.05";
     };
