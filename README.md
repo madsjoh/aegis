@@ -13,7 +13,8 @@ The `aegis` runner performs these steps when you launch it in a workspace:
 2. Snapshots the user configuration into the workspace state on first run.
 3. Builds a NixOS guest whose CPU and memory come from the merged
    configuration.
-4. Shares the workspace and the configuration directory into the guest.
+4. Shares the workspace, the configuration, and the OpenCode state and
+   share directories into the guest.
 5. Boots the guest and waits for its SSH server.
 6. Attaches OpenCode, which runs inside the guest as the `agent` user.
 
@@ -28,8 +29,8 @@ hypervisor toolkit.
 
 - **Linux hosts** use the [QEMU VM][qemu-vm] backend. The workspace and
   configuration are shared over virtiofs, SSH is served over vsock, and the
-  Nix store is a read-only erofs image that exposes only the guest's own
-  closure.
+  Nix store is an erofs image that exposes only the guest's own closure with a
+  writable tmpfs overlay.
 - **macOS hosts** use the [Apple Virtualization framework backend][vz-vm]
   (`vzvm`) with Rosetta. Shares use the framework's built-in virtiofs, and SSH
   is forwarded from a host port to the guest over vsock.
