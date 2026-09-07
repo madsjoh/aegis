@@ -30,8 +30,6 @@ in
   boot.initrd.kernelModules = [ "vmw_vsock_virtio_transport" ];
   boot.kernelModules = [ "virtiofs" ];
 
-  services.openssh.enable = true;
-
   virtualisation = {
     graphics = false;
     diskImage = null;
