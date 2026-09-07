@@ -9,9 +9,9 @@ wait_for_ssh() {
     fi
 
     failed_probes=$((failed_probes + 1))
-    if [ $((failed_probes % 30)) -eq 0 ]; then
+    if [ $((failed_probes % 150)) -eq 0 ]; then
       echo "Still waiting for the guest SSH server..."
     fi
-    sleep 1
+    sleep 0.2
   done
 }
