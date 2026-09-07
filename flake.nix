@@ -42,9 +42,27 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in {
-          lock = pkgs.runCommand "aegis-lock-test" { } ''
+          lock = pkgs.runCommand "aegis-lock-test" {
+            buildInputs = [ pkgs.util-linux ];
+          } ''
             set -o errexit -o nounset -o pipefail
             bash ${./tests/test-lock.sh} ${./helpers/lock.bash}
+            touch "$out"
+          '';
+
+          runner-cache = pkgs.runCommand "aegis-runner-cache-test" {
+            buildInputs = [ pkgs.openssh pkgs.util-linux ];
+          } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-runner-cache.sh} ${./helpers/runner.nix} ${./helpers/lock.bash} ${./helpers/ssh-key.bash} ${./helpers/runner-lifecycle.bash}
+            touch "$out"
+          '';
+
+          store-cache = pkgs.runCommand "aegis-store-cache-test" {
+            buildInputs = [ pkgs.util-linux ];
+          } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-store-cache.sh} ${./helpers/lock.bash} ${./helpers/store-cache.bash}
             touch "$out"
           '';
 
