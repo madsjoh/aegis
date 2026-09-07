@@ -26,7 +26,7 @@ long_startup_output="$(
   ssh() {
     attempts=$((attempts + 1))
     echo "SSH probe failed." >&2
-    [ "$attempts" -gt 121 ]
+    [ "$attempts" -gt 301 ]
   }
   kill() { return 0; }
   sleep() { return 0; }
@@ -37,16 +37,16 @@ long_startup_output="$(
 long_startup_status=$?
 set -o errexit
 if [ "$long_startup_status" -eq 0 ]; then
-  pass "readiness survives 121 failed probes"
+  pass "readiness survives 301 failed probes"
 else
-  fail "readiness survives 121 failed probes"
+  fail "readiness survives 301 failed probes"
 fi
 
-expected_progress=$'Still waiting for the guest SSH server...\nStill waiting for the guest SSH server...\nStill waiting for the guest SSH server...\nStill waiting for the guest SSH server...'
+expected_progress=$'Still waiting for the guest SSH server...\nStill waiting for the guest SSH server...'
 if [ "$long_startup_output" = "$expected_progress" ]; then
-  pass "readiness reports progress every 30 failed probes"
+  pass "readiness reports progress every 150 failed probes"
 else
-  fail "readiness reports progress every 30 failed probes"
+  fail "readiness reports progress every 150 failed probes"
 fi
 
 if [[ "$long_startup_output" != *"SSH probe failed."* ]]; then
