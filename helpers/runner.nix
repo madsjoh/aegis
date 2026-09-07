@@ -170,9 +170,10 @@ pkgs.writeShellApplication {
     prepare_vm_log "$VM_LOG"
     if [ "$IS_DARWIN" = "true" ]; then
       wait_for_image_lock "$IMAGE_LOCK_FILE" IMAGE_LOCK_DESCRIPTOR
+      link_shared_store_images "$STATE_DIR" "$CACHE_DIR"
       (
         close_lock_descriptors "$IMAGE_LOCK_DESCRIPTOR" "$WORKSPACE_LOCK_DESCRIPTOR"
-        VZVM_STATE_DIR="$CACHE_DIR" "''${VM_PATH}/bin/run-aegis-vm" "$@"
+        VZVM_STATE_DIR="$STATE_DIR" "''${VM_PATH}/bin/run-aegis-vm" "$@"
       ) &>> "$VM_LOG" &
     else
       (
@@ -186,9 +187,9 @@ pkgs.writeShellApplication {
         cat "$VM_LOG" >&2
         exit 1
       fi
+      publish_store_images "$STATE_DIR" "$CACHE_DIR"
       release_lock "$IMAGE_LOCK_DESCRIPTOR"
       IMAGE_LOCK_DESCRIPTOR=""
-      remove_legacy_store_images "$STATE_DIR" "$CACHE_DIR"
     fi
 
     # 11. Wait for the guest SSH server.

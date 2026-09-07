@@ -22,19 +22,29 @@ wait_for_guest_start() {
   done
 }
 
-remove_legacy_store_images() {
+link_shared_store_images() {
   local workspace_state_directory="${1:?workspace state directory}"
   local shared_cache_directory="${2:?shared cache directory}"
   local shared_image
 
-  if [ "$workspace_state_directory" -ef "$shared_cache_directory" ]; then
-    return 0
-  fi
-
   for shared_image in "$shared_cache_directory"/store-*.img; do
     if [ -f "$shared_image" ]; then
-      rm -f -- "$workspace_state_directory"/store-*.img
-      return 0
+      ln -sfn "$shared_image" "$workspace_state_directory/$(basename "$shared_image")"
+    fi
+  done
+}
+
+publish_store_images() {
+  local workspace_state_directory="${1:?workspace state directory}"
+  local shared_cache_directory="${2:?shared cache directory}"
+  local workspace_image
+  local image_name
+
+  for workspace_image in "$workspace_state_directory"/store-*.img; do
+    if [ -f "$workspace_image" ] && [ ! -L "$workspace_image" ]; then
+      image_name="$(basename "$workspace_image")"
+      mv -f -- "$workspace_image" "$shared_cache_directory/$image_name"
+      ln -s "$shared_cache_directory/$image_name" "$workspace_image"
     fi
   done
 }

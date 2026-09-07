@@ -121,35 +121,30 @@ else
   pass "VM exit takes precedence over stale readiness"
 fi
 
-# Legacy cleanup removes only direct image children from a distinct workspace.
+# Workspace state links cached images without exposing cached vzvm state.
 WORKSPACE_STATE_DIRECTORY="$TMP/workspace"
 SHARED_CACHE_DIRECTORY="$TMP/shared"
-mkdir -p "$WORKSPACE_STATE_DIRECTORY/nested" "$SHARED_CACHE_DIRECTORY"
-touch "$WORKSPACE_STATE_DIRECTORY/store-old.img"
-touch "$WORKSPACE_STATE_DIRECTORY/store-old.raw"
-touch "$WORKSPACE_STATE_DIRECTORY/nested/store-nested.img"
-remove_legacy_store_images "$WORKSPACE_STATE_DIRECTORY" "$SHARED_CACHE_DIRECTORY"
-if [ -e "$WORKSPACE_STATE_DIRECTORY/store-old.img" ]; then
-  pass "legacy image is preserved until a shared image exists"
-else
-  fail "legacy image is preserved until a shared image exists"
-fi
+mkdir -p "$WORKSPACE_STATE_DIRECTORY" "$SHARED_CACHE_DIRECTORY"
 touch "$SHARED_CACHE_DIRECTORY/store-current.img"
-remove_legacy_store_images "$WORKSPACE_STATE_DIRECTORY" "$SHARED_CACHE_DIRECTORY"
-if [ ! -e "$WORKSPACE_STATE_DIRECTORY/store-old.img" ] \
-  && [ -e "$WORKSPACE_STATE_DIRECTORY/store-old.raw" ] \
-  && [ -e "$WORKSPACE_STATE_DIRECTORY/nested/store-nested.img" ]; then
-  pass "legacy image cleanup is restricted to direct matching children"
+link_shared_store_images "$WORKSPACE_STATE_DIRECTORY" "$SHARED_CACHE_DIRECTORY"
+if [ -L "$WORKSPACE_STATE_DIRECTORY/store-current.img" ] \
+  && [ "$(readlink "$WORKSPACE_STATE_DIRECTORY/store-current.img")" = "$SHARED_CACHE_DIRECTORY/store-current.img" ] \
+  && [ ! -e "$WORKSPACE_STATE_DIRECTORY/vzvm.json" ]; then
+  pass "workspace state links shared images without sharing vzvm state"
 else
-  fail "legacy image cleanup is restricted to direct matching children"
+  fail "workspace state links shared images without sharing vzvm state"
 fi
 
-# Cleanup does nothing when the workspace and shared cache are the same directory.
-remove_legacy_store_images "$SHARED_CACHE_DIRECTORY/." "$SHARED_CACHE_DIRECTORY"
-if [ -e "$SHARED_CACHE_DIRECTORY/store-current.img" ]; then
-  pass "shared cache images are preserved"
+# A newly built workspace image moves into the shared cache and becomes a link.
+rm -f "$WORKSPACE_STATE_DIRECTORY/store-current.img"
+touch "$WORKSPACE_STATE_DIRECTORY/store-new.img"
+publish_store_images "$WORKSPACE_STATE_DIRECTORY" "$SHARED_CACHE_DIRECTORY"
+if [ -f "$SHARED_CACHE_DIRECTORY/store-new.img" ] \
+  && [ -L "$WORKSPACE_STATE_DIRECTORY/store-new.img" ] \
+  && [ "$(readlink "$WORKSPACE_STATE_DIRECTORY/store-new.img")" = "$SHARED_CACHE_DIRECTORY/store-new.img" ]; then
+  pass "workspace image publication retains only a shared image"
 else
-  fail "shared cache images are preserved"
+  fail "workspace image publication retains only a shared image"
 fi
 
 if [ "$failures" -eq 0 ]; then
