@@ -111,10 +111,6 @@ in
         config = {
           lsp = {
             jdtls.disabled = true;
-            java = {
-              command = [ "jdtls" "-data" "/tmp/jdtls-workspace" "-Djava.import.generatesMetadataFilesAtProjectRoot=false" ];
-              extensions = [ ".java" ];
-            };
             csharp.command = [ "csharp-ls" ];
             fish = {
               command = [ "fish-lsp" "start" ];
