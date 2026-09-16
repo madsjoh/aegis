@@ -14,6 +14,8 @@ in
 
   networking.hostName = "aegis";
 
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
   services.openssh.enable = true;
 
   virtualisation = {
