@@ -19,6 +19,9 @@ pkgs.writeShellApplication {
     util-linux
   ] ++ lib.optionals (!isDarwin) [ virtiofsd ];
   text = ''
+    USER_CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
+    USER_CONFIG="$USER_CONFIG_DIR/config.json"
+
     IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
     WORKSPACE_ID="$(printf '%s' "$HOST_PWD" | sha256sum | cut -c1-16)"
@@ -34,10 +37,93 @@ pkgs.writeShellApplication {
 
     ${builtins.readFile ./lock.bash}
     ${builtins.readFile ./config.bash}
+    ${builtins.readFile ./init.bash}
     ${builtins.readFile ./runner-lifecycle.bash}
     ${builtins.readFile ./ssh-key.bash}
     ${builtins.readFile ./store-cache.bash}
     ${builtins.readFile ./wait-for-ssh.bash}
+
+    run_init() {
+      mkdir --parents "$USER_CONFIG_DIR"
+      EXISTING="{}"
+      if [ -f "$USER_CONFIG" ]; then
+        EXISTING="$(cat "$USER_CONFIG")"
+        if ! is_valid_json "$EXISTING"; then
+          echo "Error: $USER_CONFIG is not valid JSON." >&2
+          return 1
+        fi
+      fi
+      ADDITIONS="{}"
+      if command -v opencode >/dev/null 2>&1; then
+        read -r -p "Include OpenCode auth? [y/N] " ANSWER || ANSWER=""
+        case "$ANSWER" in
+          y|Y)
+            AUTH_FILE="''${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+            if [ -f "$AUTH_FILE" ]; then
+              ADDITIONS="$(printf '%s' "$ADDITIONS" | jq --argjson auth "$(cat "$AUTH_FILE")" '.opencode.auth = $auth')"
+              echo "Included OpenCode auth from $AUTH_FILE."
+            else
+              echo "Warning: no OpenCode auth file found at $AUTH_FILE." >&2
+            fi
+            ;;
+          *)
+            echo "Skipped OpenCode auth."
+            ;;
+        esac
+      else
+        echo "OpenCode is not installed; skipping."
+      fi
+      if command -v gh >/dev/null 2>&1; then
+        read -r -p "Include GitHub token? [y/N] " ANSWER || ANSWER=""
+        case "$ANSWER" in
+          y|Y)
+            TOKEN="$(gh auth token 2>/dev/null || true)"
+            if [ -n "$TOKEN" ]; then
+              ADDITIONS="$(printf '%s' "$ADDITIONS" | jq --arg token "$TOKEN" '.github.token = $token')"
+              echo "Included GitHub token from gh."
+            else
+              echo "Warning: gh is not authenticated; run 'gh auth login' first." >&2
+            fi
+            ;;
+          *)
+            echo "Skipped GitHub token."
+            ;;
+        esac
+      else
+        echo "gh is not installed; skipping."
+      fi
+      MERGED="$(merge_object "$EXISTING" "$ADDITIONS")"
+      printf '%s\n' "$MERGED" > "$USER_CONFIG"
+      chmod 600 "$USER_CONFIG"
+      echo "Wrote $USER_CONFIG"
+    }
+
+    usage() {
+      echo "Usage: aegis [run [args...] | init | help]"
+      echo "  run   Boot the guest VM (default)."
+      echo "  init  Initialize the user configuration."
+      echo "  help  Show this help."
+    }
+
+    COMMAND=""
+    if [ "$#" -gt 0 ]; then
+      case "$1" in
+        init) COMMAND=init; shift ;;
+        run) COMMAND=run; shift ;;
+        help|--help|-h) usage; exit 0 ;;
+        *) echo "Error: unknown command '$1'." >&2; usage >&2; exit 1 ;;
+      esac
+    fi
+
+    if [ "$COMMAND" = "init" ]; then
+      run_init || exit 1
+      exit 0
+    fi
+
+    if [ ! -f "$USER_CONFIG" ]; then
+      echo "No configuration found; initializing."
+      run_init || exit 1
+    fi
 
     # 1. Acquire the workspace lock, one VM per workspace.
     if ! acquire_lock "$WORKSPACE_LOCK_FILE" WORKSPACE_LOCK_DESCRIPTOR; then
@@ -51,8 +137,6 @@ pkgs.writeShellApplication {
 
     # 2. Snapshot the user configuration into the workspace state on first run.
     # The guest mounts this writable copy, so edits never touch the global file.
-    USER_CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
-    USER_CONFIG="$USER_CONFIG_DIR/config.json"
     WORKSPACE_CONFIG_DIR="$STATE_DIR/.config/aegis"
     WORKSPACE_CONFIG="$WORKSPACE_CONFIG_DIR/config.json"
     if [ ! -f "$WORKSPACE_CONFIG" ]; then

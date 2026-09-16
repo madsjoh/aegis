@@ -50,29 +50,101 @@ remote builder.
 
 ## Usage
 
-Initialize the user configuration:
+Install the `aegis` command into your profile:
 
 ```
-nix run github:madsjoh/aegis#init
+nix profile install github:madsjoh/aegis
 ```
 
-This detects OpenCode and the GitHub CLI and prompts to include their
-credentials in `~/.config/aegis/config.json`.
+Then run Aegis from the root of your workspace:
 
-Run Aegis from the root of your workspace:
+```
+aegis
+```
+
+You can also run it without installing:
 
 ```
 nix run github:madsjoh/aegis
 ```
 
-You can also run it from a local checkout:
+Or from a local checkout:
 
 ```
 nix run .
 ```
 
+Initialize the user configuration:
+
+```
+aegis init
+```
+
+This detects OpenCode and the GitHub CLI and prompts to include their
+credentials in `~/.config/aegis/config.json`. Aegis runs this step
+automatically on the first run, or whenever the configuration is missing.
+
 The runner prints the host and guest systems, then builds and boots the VM and
 attaches OpenCode.
+
+## System Integration
+
+To install Aegis through your system configuration, add the flake as an input
+and import the module for your host system. For NixOS:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    aegis.url = "github:madsjoh/aegis";
+    aegis.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, aegis, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        aegis.nixosModules.default
+      ];
+    };
+  };
+}
+```
+
+For nix-darwin, use the same module through `darwinModules`:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nix-darwin.url = "github:LnL7/nix-darwin";
+    aegis.url = "github:madsjoh/aegis";
+    aegis.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nix-darwin, aegis, ... }: {
+    darwinConfigurations.mymac = nix-darwin.lib.darwinSystem {
+      system = "aarch64-darwin";
+      modules = [
+        aegis.darwinModules.default
+      ];
+    };
+  };
+}
+```
+
+For Home Manager, import the Home Manager module instead:
+
+```nix
+home-manager.users.alice = {
+  imports = [ inputs.aegis.homeManagerModules.default ];
+};
+```
+
+The `nixpkgs.follows` line keeps Aegis on the same nixpkgs revision as the
+host, so it does not download a second copy. A Darwin host builds a Linux
+guest, so it needs a Linux builder such as the nix-darwin `linux-builder` or a
+remote builder.
 
 ## Configuration
 

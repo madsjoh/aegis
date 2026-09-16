@@ -18,24 +18,35 @@
   outputs = { self, nixpkgs, home-manager, metis }:
     let
       aegis = import ./helpers { inherit nixpkgs home-manager metis; };
+      flakeRef = if (self.rev or "") != "" then "github:madsjoh/aegis/${self.rev}" else "path:${self.outPath}";
+      systemModule = { pkgs, ... }: {
+        environment.systemPackages = [ self.packages.${pkgs.system}.default ];
+      };
     in {
+      nixosModules.default = systemModule;
+
+      darwinModules.default = systemModule;
+
+      homeManagerModules.default = { pkgs, ... }: {
+        home.packages = [ self.packages.${pkgs.system}.default ];
+      };
+
       apps = aegis.forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in {
           default = {
             type = "app";
-            program = "${aegis.mkRunner { inherit pkgs system; flakeRef = "path:${self.outPath}"; }}/bin/aegis";
-          };
-          init = {
-            type = "app";
-            program = "${aegis.mkInit { inherit pkgs; }}/bin/aegis-init";
+            program = "${aegis.mkRunner { inherit pkgs system flakeRef; }}/bin/aegis";
           };
         });
 
       packages = aegis.forAllSystems (system:
-        {
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in {
           "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.system.build.vm;
+          default = aegis.mkRunner { inherit pkgs system flakeRef; };
         });
 
       checks = aegis.forAllSystems (system:
