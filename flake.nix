@@ -20,7 +20,7 @@
       aegis = import ./helpers { inherit nixpkgs home-manager metis; };
       flakeRef = if (self.rev or "") != "" then "github:madsjoh/aegis/${self.rev}" else "path:${self.outPath}";
       systemModule = { pkgs, ... }: {
-        environment.systemPackages = [ self.packages.${pkgs.system}.default ];
+        environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
       };
     in {
       nixosModules.default = systemModule;
@@ -28,7 +28,7 @@
       darwinModules.default = systemModule;
 
       homeManagerModules.default = { pkgs, ... }: {
-        home.packages = [ self.packages.${pkgs.system}.default ];
+        home.packages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
       };
 
       apps = aegis.forAllSystems (system:
