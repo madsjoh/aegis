@@ -18,8 +18,6 @@ let
   gitUserName = envStrOrNull "VM_GIT_NAME";
   gitUserEmail = envStrOrNull "VM_GIT_EMAIL";
 
-  maven = pkgs.maven.override { jdk_headless = pkgs.temurin-bin-26; };
-
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
     runtimeInputs = with pkgs; [ coreutils git jq opencode ];
@@ -144,8 +142,8 @@ in
         fd
         bash
         fish
-        temurin-bin-26
-        maven
+        temurin-bin-27
+        (maven.override { jdk_headless = temurin-bin-27; })
         python3
         go
         cargo
@@ -155,7 +153,7 @@ in
       ];
 
       home.sessionVariables = {
-        JAVA_HOME = "${pkgs.temurin-bin-26.home}";
+        JAVA_HOME = "${pkgs.temurin-bin-27.home}";
       };
 
       home.stateVersion = "24.05";

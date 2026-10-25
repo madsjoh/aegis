@@ -186,8 +186,10 @@ pkgs.writeShellApplication {
     export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM
     export VM_SKILL_ANTHROPIC VM_SKILL_MATTPOCOCK VM_SKILL_VERCEL
 
-    echo "Aegis Active [Host: ${system} | Guest: ${guestSystem system}]"
-    echo "Workspace: $HOST_PWD"
+    echo "Aegis [Host: ${system} | Guest: ${guestSystem system}]"
+    echo "Workspace : $HOST_PWD"
+    echo "Config    : $WORKSPACE_CONFIG_DIR"
+    echo "State     : $STATE_DIR"
 
     # 8. Build the target VM.
     echo "Building the guest VM..."
