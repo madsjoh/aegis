@@ -49,6 +49,37 @@ else
   fail "merge_json gives later files precedence"
 fi
 
+export HOME="$TMP/home"
+mkdir --parents "$HOME"
+printf '%s\n' '{"github":{"token":"host-token"},"opencode":{"auth":{"example":{"type":"api","key":"provider-secret"}},"permission":"allow","model":"example/model","agent":{"review":{"description":"Review changes","permission":{"edit":"deny"}}},"lsp":false,"plugin":["example-plugin"],"provider":{"example":{"options":{"baseURL":"https://example.com"}}}}}' > "$TMP/opencode.json"
+if declare -F prepare_opencode >/dev/null \
+  && prepare_opencode "$TMP/opencode.json" \
+  && printf '%s' "$OPENCODE_CONFIG_CONTENT" | jq --exit-status '
+    . == {
+      "permission": "allow",
+      "model": "example/model",
+      "agent": {"review": {"description": "Review changes", "permission": {"edit": "deny"}}},
+      "lsp": false,
+      "plugin": ["example-plugin"],
+      "provider": {"example": {"options": {"baseURL": "https://example.com"}}}
+    }' >/dev/null \
+  && jq --exit-status '. == {"example":{"type":"api","key":"provider-secret"}}' "$HOME/.local/share/opencode/auth.json" >/dev/null \
+  && bash -c 'test -n "$OPENCODE_CONFIG_CONTENT"'; then
+  pass "OpenCode receives all settings while authentication stays in its own file"
+else
+  fail "OpenCode receives all settings while authentication stays in its own file"
+fi
+
+printf '{}\n' > "$TMP/empty.json"
+if declare -F prepare_opencode >/dev/null \
+  && prepare_opencode "$TMP/empty.json" \
+  && [ "$OPENCODE_CONFIG_CONTENT" = "{}" ] \
+  && jq --exit-status '.example.key == "provider-secret"' "$HOME/.local/share/opencode/auth.json" >/dev/null; then
+  pass "missing OpenCode settings produce an empty override and preserve existing authentication"
+else
+  fail "missing OpenCode settings produce an empty override and preserve existing authentication"
+fi
+
 if [ "$failures" -eq 0 ]; then
   echo "all config tests passed"
 else

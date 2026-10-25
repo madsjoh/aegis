@@ -1,4 +1,4 @@
-{ nixpkgs, home-manager, metis, guestSystem }:
+{ nixpkgs, opencode-nixpkgs, home-manager, metis, guestSystem }:
 
 hostSystem:
 
@@ -17,6 +17,11 @@ nixpkgs.lib.nixosSystem {
     (import ../modules/user.nix { inherit metis; })
     (import ../modules/services.nix)
     ({ ... }: {
+      nixpkgs.overlays = [
+        (_final: previous: {
+          opencode = opencode-nixpkgs.legacyPackages.${previous.stdenv.hostPlatform.system}.opencode;
+        })
+      ];
       virtualisation.host.pkgs = nixpkgs.legacyPackages.${hostSystem};
     })
   ] ++ (if isDarwinHost then [
