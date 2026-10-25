@@ -135,20 +135,8 @@ pkgs.writeShellApplication {
     IMAGE_LOCK_DESCRIPTOR=""
     install_cleanup_traps
 
-    # 2. Snapshot the user configuration into the workspace state on first run.
-    # The guest mounts this writable copy, so edits never touch the global file.
-    WORKSPACE_CONFIG_DIR="$STATE_DIR/.config/aegis"
-    WORKSPACE_CONFIG="$WORKSPACE_CONFIG_DIR/config.json"
-    if [ ! -f "$WORKSPACE_CONFIG" ]; then
-      mkdir -p "$WORKSPACE_CONFIG_DIR"
-      if [ -f "$USER_CONFIG" ]; then
-        cp "$USER_CONFIG" "$WORKSPACE_CONFIG"
-      else
-        printf '{}\n' > "$WORKSPACE_CONFIG"
-      fi
-      chmod 600 "$WORKSPACE_CONFIG"
-    fi
-    MERGED="$(merge_json "$WORKSPACE_CONFIG")"
+    # 2. Read the current user configuration on every run.
+    MERGED="$(merge_json "$USER_CONFIG")"
 
     # 3. VM resource settings with defaults.
     VM_CPU="$(printf '%s' "$MERGED" | jq -r '.vm.cpu // 4')"
@@ -177,7 +165,7 @@ pkgs.writeShellApplication {
 
     # 7. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
-    export HOST_CONFIG="$WORKSPACE_CONFIG_DIR"
+    export HOST_CONFIG="$USER_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
     export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY VM_SSH_PORT
     VM_HOST_UID="$(id -u)"
@@ -188,7 +176,7 @@ pkgs.writeShellApplication {
 
     echo "Aegis [Host: ${system} | Guest: ${guestSystem system}]"
     echo "Workspace : $HOST_PWD"
-    echo "Config    : $WORKSPACE_CONFIG_DIR"
+    echo "Config    : $USER_CONFIG"
     echo "State     : $STATE_DIR"
 
     # 8. Build the target VM.
@@ -223,7 +211,7 @@ pkgs.writeShellApplication {
         rm -f "$socket"
       done
       start_virtiofsd "$RUN_DIR/workspace.sock" "$HOST_WORKSPACE" "$RUN_DIR/virtiofsd-workspace.log"
-      start_virtiofsd "$RUN_DIR/config.sock" "$WORKSPACE_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
+      start_virtiofsd "$RUN_DIR/config.sock" "$USER_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
       start_virtiofsd "$RUN_DIR/opencode-state.sock" "$OPENCODE_STATE_DIR" "$RUN_DIR/virtiofsd-opencode-state.log"
       start_virtiofsd "$RUN_DIR/opencode-share.sock" "$OPENCODE_SHARE_DIR" "$RUN_DIR/virtiofsd-opencode-share.log"
       for _ in $(seq 1 50); do

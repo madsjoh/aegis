@@ -27,3 +27,16 @@ merge_json() {
   fi
   jq -s 'reduce .[] as $x ({}; . * $x)' "${files[@]}"
 }
+
+prepare_opencode() {
+  local configuration_file="${1:?path to the Aegis configuration}"
+  local configuration_content
+  configuration_content="$(jq --compact-output '(.opencode // {}) | del(.auth)' "$configuration_file")" || return 1
+  export OPENCODE_CONFIG_CONTENT="$configuration_content"
+
+  if jq --exit-status '.opencode.auth' "$configuration_file" >/dev/null 2>&1; then
+    mkdir --parents "$HOME/.local/share/opencode"
+    jq '.opencode.auth' "$configuration_file" > "$HOME/.local/share/opencode/auth.json"
+    chmod 600 "$HOME/.local/share/opencode/auth.json"
+  fi
+}
