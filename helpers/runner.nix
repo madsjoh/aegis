@@ -58,12 +58,18 @@ pkgs.writeShellApplication {
         read -r -p "Include OpenCode auth? [y/N] " ANSWER || ANSWER=""
         case "$ANSWER" in
           y|Y)
-            AUTH_FILE="''${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
-            if [ -f "$AUTH_FILE" ]; then
-              ADDITIONS="$(printf '%s' "$ADDITIONS" | jq --argjson auth "$(cat "$AUTH_FILE")" '.opencode.auth = $auth')"
-              echo "Included OpenCode auth from $AUTH_FILE."
+            AUTH_OBJECT="$(opencode auth export --standalone 2>/dev/null | jq 'map(select(.value.type == "key") | { key: .integrationID, value: { type: "api", key: .value.key } }) | from_entries' 2>/dev/null || true)"
+            if [ "$AUTH_OBJECT" = "" ] || [ "$AUTH_OBJECT" = "{}" ]; then
+              AUTH_FILE="''${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+              if [ -f "$AUTH_FILE" ]; then
+                AUTH_OBJECT="$(cat "$AUTH_FILE")"
+              fi
+            fi
+            if [ -n "$AUTH_OBJECT" ] && [ "$AUTH_OBJECT" != "{}" ]; then
+              ADDITIONS="$(printf '%s' "$ADDITIONS" | jq --argjson auth "$AUTH_OBJECT" '.opencode.auth = $auth')"
+              echo "Included OpenCode credentials."
             else
-              echo "Warning: no OpenCode auth file found at $AUTH_FILE." >&2
+              echo "Warning: no OpenCode credentials found." >&2
             fi
             ;;
           *)
@@ -182,6 +188,16 @@ pkgs.writeShellApplication {
     # 8. Build the target VM.
     echo "Building the guest VM..."
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
+    if [ "$IS_DARWIN" != "true" ]; then
+      REG_INFO_BASENAME="$(nix eval --raw --impure --expr '
+        let
+          flake = builtins.getFlake "${flakeRef}";
+          pkgs = flake.inputs.nixpkgs.legacyPackages.${system};
+          vm = flake.nixosConfigurations."aegis-vm-${system}";
+          regInfo = pkgs.closureInfo { rootPaths = vm.config.virtualisation.additionalPaths; };
+        in builtins.baseNameOf regInfo
+      ')"
+    fi
 
     # 9. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
     # need no virtiofsd.
@@ -252,7 +268,7 @@ pkgs.writeShellApplication {
     else
       (
         close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
-        "''${VM_PATH}/bin/run-aegis-vm" "$@"
+        QEMU_KERNEL_PARAMS="regInfo=/nix/.ro-store/''${REG_INFO_BASENAME}/registration" "''${VM_PATH}/bin/run-aegis-vm" "$@"
       ) &>> "$VM_LOG" &
     fi
     VM_PID=$!

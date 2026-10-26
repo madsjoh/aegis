@@ -63,21 +63,29 @@ if declare -F prepare_opencode >/dev/null \
       "plugin": ["example-plugin"],
       "provider": {"example": {"options": {"baseURL": "https://example.com"}}}
     }' >/dev/null \
-  && jq --exit-status '. == {"example":{"type":"api","key":"provider-secret"}}' "$HOME/.local/share/opencode/auth.json" >/dev/null \
+  && declare -F opencode_auth_entries >/dev/null \
+  && opencode_auth_entries "$TMP/opencode.json" | jq --exit-status '
+    . == [{
+      "id": "cred_aegis_example",
+      "integrationID": "example",
+      "label": "API key",
+      "active": true,
+      "value": {"type": "key", "key": "provider-secret"}
+    }]' >/dev/null \
   && bash -c 'test -n "$OPENCODE_CONFIG_CONTENT"'; then
-  pass "OpenCode receives all settings while authentication stays in its own file"
+  pass "OpenCode receives all settings while authentication becomes credential entries"
 else
-  fail "OpenCode receives all settings while authentication stays in its own file"
+  fail "OpenCode receives all settings while authentication becomes credential entries"
 fi
 
 printf '{}\n' > "$TMP/empty.json"
 if declare -F prepare_opencode >/dev/null \
   && prepare_opencode "$TMP/empty.json" \
   && [ "$OPENCODE_CONFIG_CONTENT" = "{}" ] \
-  && jq --exit-status '.example.key == "provider-secret"' "$HOME/.local/share/opencode/auth.json" >/dev/null; then
-  pass "missing OpenCode settings produce an empty override and preserve existing authentication"
+  && opencode_auth_entries "$TMP/empty.json" | jq --exit-status '. == []' >/dev/null; then
+  pass "missing OpenCode settings produce an empty override and no credential entries"
 else
-  fail "missing OpenCode settings produce an empty override and preserve existing authentication"
+  fail "missing OpenCode settings produce an empty override and no credential entries"
 fi
 
 if [ "$failures" -eq 0 ]; then
