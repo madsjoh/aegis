@@ -82,11 +82,11 @@
         "vercel-skills": "vercel-skills"
       },
       "locked": {
-        "lastModified": 1789583271,
-        "narHash": "sha256-FkmLJtXZIAPN1SC3A3MaOHLIhApasj0dv4PpB5W6NEE=",
+        "lastModified": 1793048548,
+        "narHash": "sha256-PX8n4gZi/tjB5YZE68g5kCdPQdKcPsXjIugyAWMY6+M=",
         "owner": "madsjoh",
         "repo": "metis",
-        "rev": "9e009e1a0b45eb42047b5693e9fb3b79addc6977",
+        "rev": "bc86c59d01e95e18297b716a95884620baea6397",
         "type": "github"
       },
       "original": {
@@ -111,43 +111,26 @@
         "type": "github"
       }
     },
-    "opencode-nixpkgs": {
-      "locked": {
-        "lastModified": 1788614874,
-        "narHash": "sha256-7QYjT2vHLuX9Z1pdxHXDKCbh1CR3D/2rywB9Tx0MPRg=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "c043004d1c6985732bcc1cbc5a9c9aecbbb4e0f0",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "c043004d1c6985732bcc1cbc5a9c9aecbbb4e0f0",
-        "type": "github"
-      }
-    },
     "root": {
       "inputs": {
         "home-manager": "home-manager",
         "metis": "metis",
-        "nixpkgs": "nixpkgs",
-        "opencode-nixpkgs": "opencode-nixpkgs"
+        "nixpkgs": "nixpkgs"
       }
     },
     "superpowers": {
       "flake": false,
       "locked": {
-        "lastModified": 1784852836,
-        "narHash": "sha256-F5LEk0yNWbMpan1vZSFZM76XSpsFGvA7h8q6Idrvenk=",
+        "lastModified": 1792616449,
+        "narHash": "sha256-9+69YEdjdaDu5sWTyAbufSVcZgGD7h6wAq4nUVY2syE=",
         "owner": "obra",
         "repo": "superpowers",
-        "rev": "3dcbd5c4b48e02263fbf4a3c01e3fe4f81d584d9",
+        "rev": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b",
         "type": "github"
       },
       "original": {
         "owner": "obra",
-        "ref": "v6.2.0",
+        "ref": "v7.0.1",
         "repo": "superpowers",
         "type": "github"
       }

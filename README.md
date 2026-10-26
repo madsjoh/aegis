@@ -231,9 +231,8 @@ logs. Override its base directory with `XDG_STATE_HOME`.
 ## Development
 
 The helpers are plain Bash and Nix modules under `helpers/` and `modules/`.
-The guest pins OpenCode to `1.18.28` through the `opencode-nixpkgs` input for
-compatibility with the Superpowers plugin and the `auth.json` credential format.
-Other guest packages use the main `nixpkgs` input.
+The guest uses the latest OpenCode from the main `nixpkgs` input, the same
+revision as every other guest package.
 
 Run the test suite with:
 

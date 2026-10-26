@@ -1,4 +1,4 @@
-{ nixpkgs, opencode-nixpkgs, home-manager, metis }:
+{ nixpkgs, home-manager, metis }:
 
 let
   hostSystems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
@@ -13,7 +13,7 @@ let
   mkRunner = import ./runner.nix { inherit guestSystem; };
 
   mkVmConfig = import ./guest.nix {
-    inherit nixpkgs opencode-nixpkgs home-manager metis guestSystem;
+    inherit nixpkgs home-manager metis guestSystem;
   };
 in
 {
