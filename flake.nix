@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    opencode-nixpkgs.url = "github:NixOS/nixpkgs/c043004d1c6985732bcc1cbc5a9c9aecbbb4e0f0";
 
     home-manager = {
       url = "github:nix-community/home-manager";
@@ -16,9 +15,9 @@
     };
   };
 
-  outputs = { self, nixpkgs, opencode-nixpkgs, home-manager, metis }:
+  outputs = { self, nixpkgs, home-manager, metis }:
     let
-      aegis = import ./helpers { inherit nixpkgs opencode-nixpkgs home-manager metis; };
+      aegis = import ./helpers { inherit nixpkgs home-manager metis; };
       flakeRef = if (self.rev or "") != "" then "github:madsjoh/aegis/${self.rev}" else "path:${self.outPath}";
       systemModule = { pkgs, ... }: {
         environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
@@ -111,7 +110,7 @@
             test "${aegis.guestSystem "x86_64-linux"}" = "x86_64-linux"
             test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-darwin.config.services.openssh.enable}" = "1"
             test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-linux.config.services.openssh.enable}" = "1"
-            test "${(nixpkgs.lib.findFirst (package: (package.pname or "") == "opencode") (throw "Guest OpenCode package is missing") self.nixosConfigurations.aegis-vm-aarch64-darwin.config.home-manager.users.agent.home.packages).version}" = "1.18.28"
+            test "${(nixpkgs.lib.findFirst (package: (package.pname or "") == "opencode") (throw "Guest OpenCode package is missing") self.nixosConfigurations.aegis-vm-aarch64-darwin.config.home-manager.users.agent.home.packages).version}" = "2.0.32"
             touch "$out"
           '';
         });
