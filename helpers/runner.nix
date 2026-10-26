@@ -188,6 +188,16 @@ pkgs.writeShellApplication {
     # 8. Build the target VM.
     echo "Building the guest VM..."
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
+    if [ "$IS_DARWIN" != "true" ]; then
+      REG_INFO_BASENAME="$(nix eval --raw --impure --expr '
+        let
+          flake = builtins.getFlake "${flakeRef}";
+          pkgs = flake.inputs.nixpkgs.legacyPackages.${system};
+          vm = flake.nixosConfigurations."aegis-vm-${system}";
+          regInfo = pkgs.closureInfo { rootPaths = vm.config.virtualisation.additionalPaths; };
+        in builtins.baseNameOf regInfo
+      ')"
+    fi
 
     # 9. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
     # need no virtiofsd.
@@ -258,7 +268,7 @@ pkgs.writeShellApplication {
     else
       (
         close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
-        "''${VM_PATH}/bin/run-aegis-vm" "$@"
+        QEMU_KERNEL_PARAMS="regInfo=/nix/.ro-store/''${REG_INFO_BASENAME}/registration" "''${VM_PATH}/bin/run-aegis-vm" "$@"
       ) &>> "$VM_LOG" &
     fi
     VM_PID=$!
