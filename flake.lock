@@ -82,11 +82,11 @@
         "vercel-skills": "vercel-skills"
       },
       "locked": {
-        "lastModified": 1793048548,
-        "narHash": "sha256-PX8n4gZi/tjB5YZE68g5kCdPQdKcPsXjIugyAWMY6+M=",
+        "lastModified": 1793054693,
+        "narHash": "sha256-eW63H36gBpfVqaCRt1q5TKlf5vPeb+Sl5xNNIC4Q2yc=",
         "owner": "madsjoh",
         "repo": "metis",
-        "rev": "bc86c59d01e95e18297b716a95884620baea6397",
+        "rev": "54b94555b17d7b208eb1366a7ca8f6719982c5f4",
         "type": "github"
       },
       "original": {
