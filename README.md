@@ -18,9 +18,11 @@ The `aegis` runner performs these steps when you launch it in a workspace:
 6. Attaches OpenCode, which runs inside the guest as the `agent` user.
 
 The guest mounts your workspace at `/workspace`, the configuration at `/aegis`,
-and a copy of the host Git configuration at `/run/aegis/gitconfig`. OpenCode
-therefore sees and edits the same files you do on the host, but every command
-it runs executes inside the VM.
+and a copy of the host Git configuration at `/run/aegis/gitconfig`. The
+workspace is writable, so OpenCode edits the same files you do on the host; the
+configuration and Git configuration mounts are read-only, and the agent runs
+without sudo, so it cannot modify them. Every command OpenCode runs executes
+inside the VM.
 
 ## Backends
 
@@ -162,8 +164,8 @@ Aegis keeps its user configuration in `~/.config/aegis`, or
 Aegis creates any missing file with its defaults when it runs and leaves
 existing files untouched. The files are read on every run, so changes apply to
 all workspaces the next time they launch. The configuration directory is
-mounted writable at `/aegis` in the guest, so guest edits update the same files
-on the host.
+mounted read-only at `/aegis` in the guest, so the guest cannot modify the
+host's configuration.
 
 `vm.json` supports these keys:
 
@@ -204,12 +206,12 @@ Here is an example `opencode.jsonc`:
 
 Git identity comes from the host's `~/.gitconfig`. Aegis copies it into the run
 directory each run, so the host's real file is never exposed to the guest, and
-mounts the copy at `/run/aegis/gitconfig/.gitconfig`. The mount is read-only on
-Linux. The macOS VZ backend cannot mark a share read-only, so the staged copy
-is writable there. When the host has no global configuration, the guest
-receives an empty `[user]` section so Git remains functional. Only
-`~/.gitconfig` is forwarded; the XDG `~/.config/git/config` file and any
-`[include]` targets are not resolved into the guest.
+mounts the copy read-only at `/run/aegis/gitconfig/.gitconfig`. On Linux the
+virtiofs daemon also refuses writes with `--readonly`; the macOS host-side
+read-only flag is pending an upstream vzvm change. When the host has no global
+configuration, the guest receives an empty `[user]` section so Git remains
+functional. Only `~/.gitconfig` is forwarded; the XDG `~/.config/git/config`
+file and any `[include]` targets are not resolved into the guest.
 
 Host wide data lives under `~/.local/share/aegis`. This directory contains the
 persisted `ssh_host_ed25519` key used by every workspace. On macOS, closure keyed
