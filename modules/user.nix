@@ -50,19 +50,36 @@ in
     '';
   };
 
+  # Install the host SSH public key, written by the runner into the
+  # configuration directory before boot, for the agent and root before the
+  # SSH server starts.
+  systemd.services.aegis-ssh-keys = {
+    description = "Install the host SSH public key for the agent and root";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "sshd.service" ];
+    after = [ "local-fs.target" ];
+    serviceConfig.Type = "oneshot";
+    serviceConfig.RemainAfterExit = true;
+    script = ''
+      if [ -f /aegis/ssh/authorized_keys ]; then
+        mkdir -p /home/agent/.ssh
+        cp /aegis/ssh/authorized_keys /home/agent/.ssh/authorized_keys
+        chown agent:users /home/agent/.ssh/authorized_keys
+        chmod 600 /home/agent/.ssh/authorized_keys
+        mkdir -p /root/.ssh
+        cp /aegis/ssh/authorized_keys /root/.ssh/authorized_keys
+        chown root:root /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+      fi
+    '';
+  };
+
   users.users.agent = {
     isNormalUser = true;
     extraGroups = [ "wheel" ];
     home = "/home/agent";
     shell = lib.getExe pkgs.bash;
-    openssh.authorizedKeys.keys = [
-      (builtins.getEnv "VM_SSH_PUBLIC_KEY")
-    ];
   };
-
-  users.users.root.openssh.authorizedKeys.keys = [
-    (builtins.getEnv "VM_SSH_PUBLIC_KEY")
-  ];
 
   home-manager = {
     useGlobalPkgs = true;

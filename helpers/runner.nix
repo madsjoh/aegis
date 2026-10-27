@@ -96,12 +96,14 @@ pkgs.writeShellApplication {
     SSH_KEY="$DATA_DIR/ssh_host_ed25519"
     ensure_ssh_key "$SSH_KEY"
     VM_SSH_PUBLIC_KEY="$(cat "$SSH_KEY.pub")"
+    mkdir -p "$USER_CONFIG_DIR/ssh"
+    printf '%s\n' "$VM_SSH_PUBLIC_KEY" > "$USER_CONFIG_DIR/ssh/authorized_keys"
 
     # 7. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
-    export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY VM_SSH_PORT
+    export VM_MOUNT_TAG VM_CID VM_SSH_PORT
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
