@@ -91,6 +91,13 @@
             touch "$out"
           '';
 
+          qemu-override = pkgs.runCommand "aegis-qemu-override-test" {
+            buildInputs = [ pkgs.gnugrep ];
+          } ''
+            grep --fixed-strings --quiet 'memory-backend=aegis-ram' ${self.packages.${system}.default}/bin/aegis
+            touch "$out"
+          '';
+
           scaffold = pkgs.runCommand "aegis-scaffold-test" {
             buildInputs = [ pkgs.jq pkgs.coreutils ];
           } ''

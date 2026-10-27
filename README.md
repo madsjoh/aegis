@@ -80,6 +80,16 @@ scaffolds any missing configuration file on the first run.
 The runner prints the host and guest systems, then builds and boots the VM and
 attaches OpenCode.
 
+## Upgrading
+
+Aegis previously kept every setting in a single `~/.config/aegis/config.json`
+file. That file is no longer read or written. Move your settings by hand into
+the new files: `vm` → `vm.json`, `skills` → `skills.json`, and `opencode`
+(authentication excluded) → `opencode.jsonc`. The `github.token` and
+`opencode.auth` settings are removed; credentials will be supplied later by a
+token vendor through `{env:...}` placeholders. Aegis scaffolds any missing file
+with its defaults on the first run.
+
 ## System Integration
 
 To install Aegis through your system configuration, add the flake as an input
@@ -197,7 +207,9 @@ directory each run, so the host's real file is never exposed to the guest, and
 mounts the copy at `/run/aegis/gitconfig/.gitconfig`. The mount is read-only on
 Linux. The macOS VZ backend cannot mark a share read-only, so the staged copy
 is writable there. When the host has no global configuration, the guest
-receives an empty `[user]` section so Git remains functional.
+receives an empty `[user]` section so Git remains functional. Only
+`~/.gitconfig` is forwarded; the XDG `~/.config/git/config` file and any
+`[include]` targets are not resolved into the guest.
 
 Host wide data lives under `~/.local/share/aegis`. This directory contains the
 persisted `ssh_host_ed25519` key used by every workspace. On macOS, closure keyed
