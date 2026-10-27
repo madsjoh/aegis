@@ -101,7 +101,7 @@ in
   virtualisation.fileSystems."/aegis" = {
     device = configTag;
     fsType = "virtiofs";
-    options = [ "x-systemd.requires=modprobe@virtiofs.service" ];
+    options = [ "ro" "x-systemd.requires=modprobe@virtiofs.service" ];
   };
 
   virtualisation.fileSystems."/home/agent/.local/state/opencode" = {
