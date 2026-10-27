@@ -10,17 +10,19 @@ the host stays untouched.
 The `aegis` runner performs these steps when you launch it in a workspace:
 
 1. Acquires a per workspace lock so only one VM runs at a time.
-2. Reads the current user configuration.
-3. Builds a NixOS guest whose CPU and memory come from the merged
-   configuration.
-4. Shares the workspace, the configuration, and the OpenCode state and
-   share directories into the guest.
+2. Reads the user configuration files, creating any that are missing.
+3. Builds a NixOS guest whose CPU and memory come from `vm.json`.
+4. Shares the workspace, the configuration, the OpenCode state and share
+   directories, and the host Git configuration into the guest.
 5. Boots the guest and waits for its SSH server.
 6. Attaches OpenCode, which runs inside the guest as the `agent` user.
 
-The guest mounts your workspace at `/workspace` and the configuration at
-`/aegis`. OpenCode therefore sees and edits the same files you do on the host,
-but every command it runs executes inside the VM.
+The guest mounts your workspace at `/workspace`, the configuration at `/aegis`,
+and a copy of the host Git configuration at `/run/aegis/gitconfig`. The
+workspace is writable, so OpenCode edits the same files you do on the host; the
+configuration and Git configuration mounts are read-only, and the agent runs
+without sudo, so it cannot modify them. Every command OpenCode runs executes
+inside the VM.
 
 ## Backends
 
@@ -74,18 +76,21 @@ Or from a local checkout:
 nix run .
 ```
 
-Initialize the user configuration:
-
-```
-aegis init
-```
-
-This detects OpenCode and the GitHub CLI and prompts to include their
-credentials in `~/.config/aegis/config.json`. Aegis runs this step
-automatically on the first run, or whenever the configuration is missing.
+The runner accepts `aegis run` as the default command and `aegis help`. Aegis
+scaffolds any missing configuration file on the first run.
 
 The runner prints the host and guest systems, then builds and boots the VM and
 attaches OpenCode.
+
+## Upgrading
+
+Aegis previously kept every setting in a single `~/.config/aegis/config.json`
+file. That file is no longer read or written. Move your settings by hand into
+the new files: `vm` → `vm.json`, `skills` → `skills.json`, and `opencode`
+(authentication excluded) → `opencode.jsonc`. The `github.token` and
+`opencode.auth` settings are removed; credentials will be supplied later by a
+token vendor through `{env:...}` placeholders. Aegis scaffolds any missing file
+with its defaults on the first run.
 
 ## System Integration
 
@@ -148,71 +153,65 @@ remote builder.
 
 ## Configuration
 
-Aegis reads a single user wide JSON file:
+Aegis keeps its user configuration in `~/.config/aegis`, or
+`$XDG_CONFIG_HOME/aegis` when that variable is set. Three files live there:
 
-- `~/.config/aegis/config.json` for user wide settings.
+- `vm.json` holds the VM resources: `{"cpu":4,"mem":4096}`.
+- `skills.json` enables the Metis leaf skills:
+  `{"anthropic":false,"mattpocock":false,"vercel":false}`.
+- `opencode.jsonc` holds the OpenCode configuration.
 
-This file is read on every run, so changes apply to all workspaces the next
-time they launch. Override its base directory with `XDG_CONFIG_HOME`.
-The configuration directory is mounted writable at `/aegis` in the guest,
-so guest edits update the same user configuration file on the host.
+Aegis creates any missing file with its defaults when it runs and leaves
+existing files untouched. The files are read on every run, so changes apply to
+all workspaces the next time they launch. The configuration directory is
+mounted read-only at `/aegis` in the guest, so the guest cannot modify the
+host's configuration.
 
-The following keys are supported:
+`vm.json` supports these keys:
 
-| Key                 | Purpose                                                    | Default |
-| ------------------- | ---------------------------------------------------------- | ------- |
-| `vm.cpu`            | Number of virtual CPUs                                     | `4`     |
-| `vm.mem`            | Guest memory in MiB                                        | `4096`  |
-| `git.name`          | Git author and committer name                              | Host git |
-| `git.email`         | Git author and committer email                             | Host git |
-| `github.token`      | GitHub token exported as `GH_TOKEN` for the `gh` CLI       | None    |
-| `opencode.auth`     | OpenCode provider credentials imported into the guest credential store | None  |
-| `skills.anthropic`  | Enable the Anthropic leaf skills                           | `false` |
-| `skills.mattpocock` | Enable the Matt Pocock leaf skills                         | `false` |
-| `skills.vercel`     | Enable the Vercel leaf skills                              | `false` |
+| Key   | Purpose                | Default |
+| ----- | ---------------------- | ------- |
+| `cpu` | Number of virtual CPUs | `4`     |
+| `mem` | Guest memory in MiB    | `4096`  |
 
-`git.name` and `git.email` fall back to your host Git configuration when they
-are not set. The `opencode.auth` value is an object whose entries are imported
-into the guest OpenCode credential store. Each key is a provider ID, such as
-`deepseek`, and its value is `{"type": "api", "key": "<api key>"}`. All other
-keys under `opencode` are forwarded
-as OpenCode settings through `OPENCODE_CONFIG_CONTENT`, overriding matching
-settings generated by Metis. For example, `"permission": "allow"` under
-`opencode` allows all permissions. These settings use OpenCode's configuration
-format and are validated by OpenCode when it starts.
+`skills.json` supports these keys:
 
-The `skills` keys enable the Metis leaf skills
-inside the guest and all default to `false`, so only the superpowers spine is
-installed unless you opt in. A complete example:
+| Key          | Purpose                            | Default |
+| ------------ | ---------------------------------- | ------- |
+| `anthropic`  | Enable the Anthropic leaf skills   | `false` |
+| `mattpocock` | Enable the Matt Pocock leaf skills | `false` |
+| `vercel`     | Enable the Vercel leaf skills      | `false` |
 
-```json
+All the `skills.json` keys default to `false`, so only the superpowers spine is
+installed unless you opt in.
+
+`opencode.jsonc` is the single place for OpenCode settings, including
+providers, models, credentials, permissions, agents, MCP servers, and the
+provider allowlist configured through `policies`. It uses OpenCode's
+configuration format, so it accepts JSONC comments and is validated by OpenCode
+when it starts. Aegis forwards the file verbatim to OpenCode through
+`OPENCODE_CONFIG_CONTENT`, overriding matching settings generated by Metis. A
+token vendor will supply credentials later, and `opencode.jsonc` references
+them with `{env:...}` placeholders, so secrets do not have to live in the file.
+
+Here is an example `opencode.jsonc`:
+
+```jsonc
 {
-  "vm": {
-    "cpu": 4,
-    "mem": 8192
-  },
-  "git": {
-    "name": "Jane Doe",
-    "email": "jane@example.com"
-  },
-  "github": {
-    "token": "ghp_..."
-  },
-  "opencode": {
-    "auth": {
-      "anthropic": {
-        "type": "api",
-        "key": "sk-ant-..."
-      }
-    }
-  },
-  "skills": {
-    "anthropic": false,
-    "mattpocock": false,
-    "vercel": true
-  }
+  // Credentials arrive from the token vendor at run time.
+  "model": "provider/model",
+  "permission": "allow"
 }
 ```
+
+Git identity comes from the host's `~/.gitconfig`. Aegis copies it into the run
+directory each run, so the host's real file is never exposed to the guest, and
+mounts the copy read-only at `/run/aegis/gitconfig/.gitconfig`. On Linux the
+virtiofs daemon also refuses writes with `--readonly`; the macOS host-side
+read-only flag is pending an upstream vzvm change. When the host has no global
+configuration, the guest receives an empty `[user]` section so Git remains
+functional. Only `~/.gitconfig` is forwarded; the XDG `~/.config/git/config`
+file and any `[include]` targets are not resolved into the guest.
 
 Host wide data lives under `~/.local/share/aegis`. This directory contains the
 persisted `ssh_host_ed25519` key used by every workspace. On macOS, closure keyed
@@ -226,9 +225,11 @@ The state directory holds `vzvm.json`, an `opencode/` directory, and a `run/`
 directory. The `opencode/` subdirectories
 (`state` and `share`) are mounted into the guest under `.local/state/opencode` and `.local/share/opencode`
 so sessions and data persist between runs. The OpenCode configuration under
-`.config/opencode` is not persisted; it is generated by Metis on every boot.
-The `run/` directory holds the workspace lock, the virtiofsd sockets, and the
-logs. Override its base directory with `XDG_STATE_HOME`.
+`.config/opencode` is not persisted; Metis generates it on every boot, and
+`opencode.jsonc` overrides matching settings.
+The `run/` directory holds the workspace lock, the virtiofsd sockets, the
+staged git configuration, and the logs. Override its base directory with
+`XDG_STATE_HOME`.
 
 ## Development
 

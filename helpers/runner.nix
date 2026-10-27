@@ -11,7 +11,6 @@ pkgs.writeShellApplication {
   name = "aegis";
   runtimeInputs = with pkgs; [
     coreutils
-    git
     gnugrep
     jq
     nix
@@ -20,7 +19,6 @@ pkgs.writeShellApplication {
   ] ++ lib.optionals (!isDarwin) [ virtiofsd ];
   text = ''
     USER_CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
-    USER_CONFIG="$USER_CONFIG_DIR/config.json"
 
     IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
@@ -37,99 +35,27 @@ pkgs.writeShellApplication {
 
     ${builtins.readFile ./lock.bash}
     ${builtins.readFile ./config.bash}
-    ${builtins.readFile ./init.bash}
+    ${builtins.readFile ./scaffold.bash}
     ${builtins.readFile ./runner-lifecycle.bash}
     ${builtins.readFile ./ssh-key.bash}
     ${builtins.readFile ./store-cache.bash}
     ${builtins.readFile ./wait-for-ssh.bash}
 
-    run_init() {
-      mkdir --parents "$USER_CONFIG_DIR"
-      EXISTING="{}"
-      if [ -f "$USER_CONFIG" ]; then
-        EXISTING="$(cat "$USER_CONFIG")"
-        if ! is_valid_json "$EXISTING"; then
-          echo "Error: $USER_CONFIG is not valid JSON." >&2
-          return 1
-        fi
-      fi
-      ADDITIONS="{}"
-      if command -v opencode >/dev/null 2>&1; then
-        read -r -p "Include OpenCode auth? [y/N] " ANSWER || ANSWER=""
-        case "$ANSWER" in
-          y|Y)
-            AUTH_OBJECT="$(opencode auth export --standalone 2>/dev/null | jq 'map(select(.value.type == "key") | { key: .integrationID, value: { type: "api", key: .value.key } }) | from_entries' 2>/dev/null || true)"
-            if [ "$AUTH_OBJECT" = "" ] || [ "$AUTH_OBJECT" = "{}" ]; then
-              AUTH_FILE="''${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
-              if [ -f "$AUTH_FILE" ]; then
-                AUTH_OBJECT="$(cat "$AUTH_FILE")"
-              fi
-            fi
-            if [ -n "$AUTH_OBJECT" ] && [ "$AUTH_OBJECT" != "{}" ]; then
-              ADDITIONS="$(printf '%s' "$ADDITIONS" | jq --argjson auth "$AUTH_OBJECT" '.opencode.auth = $auth')"
-              echo "Included OpenCode credentials."
-            else
-              echo "Warning: no OpenCode credentials found." >&2
-            fi
-            ;;
-          *)
-            echo "Skipped OpenCode auth."
-            ;;
-        esac
-      else
-        echo "OpenCode is not installed; skipping."
-      fi
-      if command -v gh >/dev/null 2>&1; then
-        read -r -p "Include GitHub token? [y/N] " ANSWER || ANSWER=""
-        case "$ANSWER" in
-          y|Y)
-            TOKEN="$(gh auth token 2>/dev/null || true)"
-            if [ -n "$TOKEN" ]; then
-              ADDITIONS="$(printf '%s' "$ADDITIONS" | jq --arg token "$TOKEN" '.github.token = $token')"
-              echo "Included GitHub token from gh."
-            else
-              echo "Warning: gh is not authenticated; run 'gh auth login' first." >&2
-            fi
-            ;;
-          *)
-            echo "Skipped GitHub token."
-            ;;
-        esac
-      else
-        echo "gh is not installed; skipping."
-      fi
-      MERGED="$(merge_object "$EXISTING" "$ADDITIONS")"
-      printf '%s\n' "$MERGED" > "$USER_CONFIG"
-      chmod 600 "$USER_CONFIG"
-      echo "Wrote $USER_CONFIG"
-    }
-
     usage() {
-      echo "Usage: aegis [run [args...] | init | help]"
+      echo "Usage: aegis [run [args...] | help]"
       echo "  run   Boot the guest VM (default)."
-      echo "  init  Initialize the user configuration."
       echo "  help  Show this help."
     }
 
-    COMMAND=""
     if [ "$#" -gt 0 ]; then
       case "$1" in
-        init) COMMAND=init; shift ;;
-        run) COMMAND=run; shift ;;
+        run) shift ;;
         help|--help|-h) usage; exit 0 ;;
         *) echo "Error: unknown command '$1'." >&2; usage >&2; exit 1 ;;
       esac
     fi
 
-    if [ "$COMMAND" = "init" ]; then
-      run_init || exit 1
-      exit 0
-    fi
-
-    if [ ! -f "$USER_CONFIG" ]; then
-      echo "No configuration found; initializing."
-      run_init || exit 1
-    fi
+    scaffold_config "$USER_CONFIG_DIR"
 
     # 1. Acquire the workspace lock, one VM per workspace.
     if ! acquire_lock "$WORKSPACE_LOCK_FILE" WORKSPACE_LOCK_DESCRIPTOR; then
@@ -141,25 +67,16 @@ pkgs.writeShellApplication {
     IMAGE_LOCK_DESCRIPTOR=""
     install_cleanup_traps
 
-    # 2. Read the current user configuration on every run.
-    MERGED="$(merge_json "$USER_CONFIG")"
+    # 2. VM resource settings with defaults.
+    VM_CPU="$(jq -r '.cpu // 4' "$USER_CONFIG_DIR/vm.json")"
+    VM_MEM="$(jq -r '.mem // 4096' "$USER_CONFIG_DIR/vm.json")"
 
-    # 3. VM resource settings with defaults.
-    VM_CPU="$(printf '%s' "$MERGED" | jq -r '.vm.cpu // 4')"
-    VM_MEM="$(printf '%s' "$MERGED" | jq -r '.vm.mem // 4096')"
+    # 3. Metis leaf skills, disabled by default.
+    VM_SKILL_ANTHROPIC="$(jq -r '.anthropic // false' "$USER_CONFIG_DIR/skills.json")"
+    VM_SKILL_MATTPOCOCK="$(jq -r '.mattpocock // false' "$USER_CONFIG_DIR/skills.json")"
+    VM_SKILL_VERCEL="$(jq -r '.vercel // false' "$USER_CONFIG_DIR/skills.json")"
 
-    # 4. Metis leaf skills, disabled by default.
-    VM_SKILL_ANTHROPIC="$(printf '%s' "$MERGED" | jq -r '.skills.anthropic // false')"
-    VM_SKILL_MATTPOCOCK="$(printf '%s' "$MERGED" | jq -r '.skills.mattpocock // false')"
-    VM_SKILL_VERCEL="$(printf '%s' "$MERGED" | jq -r '.skills.vercel // false')"
-
-    # 5. Git identity, configuration first, host git configuration fallback.
-    HOST_GIT_NAME="$(git config --global user.name 2>/dev/null || git config user.name 2>/dev/null || true)"
-    HOST_GIT_EMAIL="$(git config --global user.email 2>/dev/null || git config user.email 2>/dev/null || true)"
-    VM_GIT_NAME="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.name // empty')" "$HOST_GIT_NAME")"
-    VM_GIT_EMAIL="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.email // empty')" "$HOST_GIT_EMAIL")"
-
-    # 6. Workspace-derived identifiers, the host wide SSH key, and the SSH
+    # 4. Workspace-derived identifiers, the host wide SSH key, and the SSH
     # transport details. Linux reaches the guest over vsock; macOS reaches it
     # over TCP through a forwarded host port.
     VM_MOUNT_TAG="ws_$(printf '%s' "$WORKSPACE_ID" | cut -c1-8)"
@@ -168,24 +85,36 @@ pkgs.writeShellApplication {
     SSH_KEY="$DATA_DIR/ssh_host_ed25519"
     ensure_ssh_key "$SSH_KEY"
     VM_SSH_PUBLIC_KEY="$(cat "$SSH_KEY.pub")"
+    mkdir -p "$USER_CONFIG_DIR/ssh"
+    printf '%s\n' "$VM_SSH_PUBLIC_KEY" > "$USER_CONFIG_DIR/ssh/authorized_keys"
 
-    # 7. Export the environment consumed by the VM build.
+    # 5. Stage the host git configuration into the run directory so the guest
+    # can mount it read-only. An empty [user] section keeps git functional when
+    # the host has no global identity.
+    mkdir -p "$RUN_DIR/gitconfig"
+    if [ -f "$HOME/.gitconfig" ]; then
+      cp "$HOME/.gitconfig" "$RUN_DIR/gitconfig/.gitconfig"
+    else
+      printf '%s\n' '[user]' > "$RUN_DIR/gitconfig/.gitconfig"
+    fi
+
+    # 6. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
-    export VM_MOUNT_TAG VM_CID VM_SSH_PUBLIC_KEY VM_SSH_PORT
+    export VM_MOUNT_TAG VM_CID VM_SSH_PORT
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
-    export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM
+    export VM_CPU VM_MEM
     export VM_SKILL_ANTHROPIC VM_SKILL_MATTPOCOCK VM_SKILL_VERCEL
 
     echo "Aegis [Host: ${system} | Guest: ${guestSystem system}]"
     echo "Workspace : $HOST_PWD"
-    echo "Config    : $USER_CONFIG"
+    echo "Config    : $USER_CONFIG_DIR"
     echo "State     : $STATE_DIR"
 
-    # 8. Build the target VM.
+    # 7. Build the target VM.
     echo "Building the guest VM..."
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
     if [ "$IS_DARWIN" != "true" ]; then
@@ -199,12 +128,16 @@ pkgs.writeShellApplication {
       ')"
     fi
 
-    # 9. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
+    # 8. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
     # need no virtiofsd.
     if [ "$IS_DARWIN" != "true" ]; then
       echo "Starting the virtiofs daemons..."
       start_virtiofsd() {
-        local socket="$1" shared_dir="$2" log="$3"
+        local socket="$1" shared_dir="$2" log="$3" readonly_flag="''${4:-}"
+        local readonly_args=""
+        if [ "$readonly_flag" = "readonly" ]; then
+          readonly_args="--readonly"
+        fi
         (
           close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
           virtiofsd \
@@ -213,7 +146,8 @@ pkgs.writeShellApplication {
             --thread-pool-size 4 \
             --cache=auto \
             --translate-uid "guest:1000:$VM_HOST_UID:1" \
-            --translate-gid "guest:100:$VM_HOST_GID:1"
+            --translate-gid "guest:100:$VM_HOST_GID:1" \
+            $readonly_args
         ) &> "$log" &
         VIRTIOFSD_PIDS="$VIRTIOFSD_PIDS $!"
       }
@@ -222,14 +156,16 @@ pkgs.writeShellApplication {
         "$RUN_DIR/config.sock"
         "$RUN_DIR/opencode-state.sock"
         "$RUN_DIR/opencode-share.sock"
+        "$RUN_DIR/gitconfig.sock"
       )
       for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do
         rm -f "$socket"
       done
       start_virtiofsd "$RUN_DIR/workspace.sock" "$HOST_WORKSPACE" "$RUN_DIR/virtiofsd-workspace.log"
-      start_virtiofsd "$RUN_DIR/config.sock" "$USER_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
+      start_virtiofsd "$RUN_DIR/config.sock" "$USER_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log" readonly
       start_virtiofsd "$RUN_DIR/opencode-state.sock" "$OPENCODE_STATE_DIR" "$RUN_DIR/virtiofsd-opencode-state.log"
       start_virtiofsd "$RUN_DIR/opencode-share.sock" "$OPENCODE_SHARE_DIR" "$RUN_DIR/virtiofsd-opencode-share.log"
+      start_virtiofsd "$RUN_DIR/gitconfig.sock" "$RUN_DIR/gitconfig" "$RUN_DIR/virtiofsd-gitconfig.log" readonly
       for _ in $(seq 1 50); do
         ready=true
         for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do
@@ -254,7 +190,7 @@ pkgs.writeShellApplication {
       done
     fi
 
-    # 10. Run the VM in the background.
+    # 9. Run the VM in the background.
     VM_LOG="$RUN_DIR/vm.log"
     echo "Booting the guest..."
     prepare_vm_log "$VM_LOG"
@@ -268,7 +204,9 @@ pkgs.writeShellApplication {
     else
       (
         close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
-        QEMU_KERNEL_PARAMS="regInfo=/nix/.ro-store/''${REG_INFO_BASENAME}/registration" "''${VM_PATH}/bin/run-aegis-vm" "$@"
+        QEMU_KERNEL_PARAMS="regInfo=/nix/.ro-store/''${REG_INFO_BASENAME}/registration" \
+          QEMU_OPTS="-smp ''${VM_CPU} -m ''${VM_MEM} -object memory-backend-memfd,id=aegis-ram,size=''${VM_MEM}M,share=on -machine memory-backend=aegis-ram" \
+          "''${VM_PATH}/bin/run-aegis-vm" "$@"
       ) &>> "$VM_LOG" &
     fi
     VM_PID=$!
@@ -282,7 +220,7 @@ pkgs.writeShellApplication {
       IMAGE_LOCK_DESCRIPTOR=""
     fi
 
-    # 11. Wait for the guest SSH server.
+    # 10. Wait for the guest SSH server.
     SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes)
     if [ "$IS_DARWIN" = "true" ]; then
       SSH_TARGET=(-p "$VM_SSH_PORT" agent@127.0.0.1)
@@ -294,7 +232,7 @@ pkgs.writeShellApplication {
     echo "Waiting for the guest SSH server..."
     wait_for_ssh
 
-    # 12. Attach OpenCode over SSH.
+    # 11. Attach OpenCode over SSH.
     ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}" "exec /run/current-system/sw/bin/opencode-shell"
   '';
 }

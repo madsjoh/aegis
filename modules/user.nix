@@ -9,49 +9,15 @@ let
     in
     if value == "" then default else builtins.fromJSON value;
 
-  envStrOrNull = name:
-    let
-      value = builtins.getEnv name;
-    in
-    if value == "" then null else value;
-
-  gitUserName = envStrOrNull "VM_GIT_NAME";
-  gitUserEmail = envStrOrNull "VM_GIT_EMAIL";
-
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
-    runtimeInputs = with pkgs; [ coreutils git jq opencode ];
+    runtimeInputs = with pkgs; [ coreutils opencode ];
     text = ''
       ${builtins.readFile ../helpers/config.bash}
 
-      USER_CONFIG="/aegis/config.json"
+      prepare_opencode "/aegis/opencode.jsonc"
 
-      MERGED="$(mktemp)"
-      cleanup_merged() { rm -f "$MERGED"; }
-      trap cleanup_merged EXIT
-
-      merge_json "$USER_CONFIG" > "$MERGED"
-
-      GITHUB_TOKEN_VALUE="$(jq -r '.github.token // empty' "$MERGED")"
-      if [ -n "$GITHUB_TOKEN_VALUE" ]; then
-        export GH_TOKEN="$GITHUB_TOKEN_VALUE"
-      fi
-
-      GIT_NAME_VALUE="$(resolve "$(jq -r '.git.name // empty' "$MERGED")" "${builtins.getEnv "VM_GIT_NAME"}")"
-      GIT_EMAIL_VALUE="$(resolve "$(jq -r '.git.email // empty' "$MERGED")" "${builtins.getEnv "VM_GIT_EMAIL"}")"
-      if [ -n "$GIT_NAME_VALUE" ]; then
-        export GIT_AUTHOR_NAME="$GIT_NAME_VALUE"
-        export GIT_COMMITTER_NAME="$GIT_NAME_VALUE"
-      fi
-      if [ -n "$GIT_EMAIL_VALUE" ]; then
-        export GIT_AUTHOR_EMAIL="$GIT_EMAIL_VALUE"
-        export GIT_COMMITTER_EMAIL="$GIT_EMAIL_VALUE"
-      fi
-
-      prepare_opencode "$MERGED"
-
-      rm -f "$MERGED"
-      trap - EXIT
+      export GIT_CONFIG_GLOBAL=/run/aegis/gitconfig/.gitconfig
 
       cd /workspace
       exec opencode /workspace
@@ -77,19 +43,35 @@ in
     '';
   };
 
-  users.users.agent = {
-    isNormalUser = true;
-    extraGroups = [ "wheel" ];
-    home = "/home/agent";
-    shell = lib.getExe pkgs.bash;
-    openssh.authorizedKeys.keys = [
-      (builtins.getEnv "VM_SSH_PUBLIC_KEY")
-    ];
+  # Install the host SSH public key, written by the runner into the
+  # configuration directory before boot, for the agent and root before the
+  # SSH server starts.
+  systemd.services.aegis-ssh-keys = {
+    description = "Install the host SSH public key for the agent and root";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "sshd.service" ];
+    after = [ "local-fs.target" ];
+    serviceConfig.Type = "oneshot";
+    serviceConfig.RemainAfterExit = true;
+    script = ''
+      if [ -f /aegis/ssh/authorized_keys ]; then
+        mkdir -p /home/agent/.ssh
+        cp /aegis/ssh/authorized_keys /home/agent/.ssh/authorized_keys
+        chown agent:users /home/agent/.ssh/authorized_keys
+        chmod 600 /home/agent/.ssh/authorized_keys
+        mkdir -p /root/.ssh
+        cp /aegis/ssh/authorized_keys /root/.ssh/authorized_keys
+        chown root:root /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+      fi
+    '';
   };
 
-  users.users.root.openssh.authorizedKeys.keys = [
-    (builtins.getEnv "VM_SSH_PUBLIC_KEY")
-  ];
+  users.users.agent = {
+    isNormalUser = true;
+    home = "/home/agent";
+    shell = lib.getExe pkgs.bash;
+  };
 
   home-manager = {
     useGlobalPkgs = true;
@@ -119,12 +101,6 @@ in
 
       programs.git = {
         enable = true;
-        settings = lib.optionalAttrs (gitUserName != null || gitUserEmail != null) {
-          user = lib.filterAttrs (_: value: value != null) {
-            name = gitUserName;
-            email = gitUserEmail;
-          };
-        };
         ignores = [
           ".opencode/"
         ];

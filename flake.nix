@@ -91,9 +91,18 @@
             touch "$out"
           '';
 
-          init = pkgs.runCommand "aegis-init-test" { buildInputs = [ pkgs.jq ]; } ''
+          qemu-override = pkgs.runCommand "aegis-qemu-override-test" {
+            buildInputs = [ pkgs.gnugrep ];
+          } ''
+            grep --fixed-strings --quiet 'memory-backend=aegis-ram' ${self.packages.${system}.default}/bin/aegis
+            touch "$out"
+          '';
+
+          scaffold = pkgs.runCommand "aegis-scaffold-test" {
+            buildInputs = [ pkgs.jq pkgs.coreutils ];
+          } ''
             set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-init.sh} ${./helpers/init.bash}
+            bash ${./tests/test-scaffold.sh} ${./helpers/scaffold.bash}
             touch "$out"
           '';
 
@@ -110,7 +119,17 @@
             test "${aegis.guestSystem "x86_64-linux"}" = "x86_64-linux"
             test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-darwin.config.services.openssh.enable}" = "1"
             test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-linux.config.services.openssh.enable}" = "1"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.systemd.services.aegis-ssh-keys.enable}" = "1"
+            test "${builtins.toString (builtins.length self.nixosConfigurations.aegis-vm-x86_64-linux.config.users.users.agent.openssh.authorizedKeys.keys)}" = "0"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.cores}" = "1"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.memorySize}" = "1024"
             test "${(nixpkgs.lib.findFirst (package: (package.pname or "") == "opencode") (throw "Guest OpenCode package is missing") self.nixosConfigurations.aegis-vm-aarch64-darwin.config.home-manager.users.agent.home.packages).version}" = "2.0.32"
+            test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.fileSystems."/run/aegis/gitconfig".options)}" = "1"
+            test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.fileSystems."/aegis".options)}" = "1"
+            test "${builtins.toJSON self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.programs.git.settings}" = "{}"
+            test "${builtins.toString (builtins.length self.nixosConfigurations.aegis-vm-x86_64-linux.config.users.users.agent.extraGroups)}" = "0"
+            test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-aarch64-darwin.config.fileSystems."/aegis".options)}" = "1"
+            test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-aarch64-darwin.config.fileSystems."/run/aegis/gitconfig".options)}" = "1"
             touch "$out"
           '';
         });

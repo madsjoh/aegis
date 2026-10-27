@@ -18,6 +18,8 @@ let
 in
 {
   virtualisation = {
+    cores = envInt "VM_CPU" 4;
+    memorySize = envInt "VM_MEM" 4096;
     sharedDirectories = {
       workspace = {
         source = "\"$HOST_WORKSPACE\"";
@@ -38,6 +40,11 @@ in
         source = "\"$HOST_STATE_DIR/opencode/share\"";
         target = "/home/agent/.local/share/opencode";
       };
+
+      gitconfig = {
+        source = "\"$HOST_STATE_DIR/run/gitconfig\"";
+        target = "/run/aegis/gitconfig";
+      };
     };
 
     vz = {
@@ -53,5 +60,16 @@ in
         }
       ];
     };
+  };
+
+  fileSystems."/aegis" = lib.mkVMOverride {
+    device = "config";
+    fsType = "virtiofs";
+    options = [ "ro" ];
+  };
+  fileSystems."/run/aegis/gitconfig" = lib.mkVMOverride {
+    device = "gitconfig";
+    fsType = "virtiofs";
+    options = [ "ro" ];
   };
 }
