@@ -18,6 +18,8 @@ let
 in
 {
   virtualisation = {
+    cores = envInt "VM_CPU" 4;
+    memorySize = envInt "VM_MEM" 4096;
     sharedDirectories = {
       workspace = {
         source = "\"$HOST_WORKSPACE\"";
