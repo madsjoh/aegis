@@ -10,8 +10,8 @@ failures=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp --directory)"
+trap 'rm --recursive --force "$TMP"' EXIT
 
 CONFIG_DIRECTORY="$TMP/config"
 scaffold_config "$CONFIG_DIRECTORY"
