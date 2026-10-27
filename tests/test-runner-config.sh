@@ -19,7 +19,8 @@ printf '%s\n' '[user]' 'name = Test User' 'email = test@example.com' > "$GIT_CON
 # Stop at the VM build boundary after capturing the runner's resolved settings.
 nix() {
   [ "$1" = build ] || return 2
-  printf '%s\n' "$HOST_CONFIG" "$VM_CPU" "$VM_MEM" > "$CAPTURE_FILE"
+  printf '%s\n' "$HOST_CONFIG" "$VM_CPU" "$VM_MEM" \
+    "$VM_SKILL_ANTHROPIC" "$VM_SKILL_MATTPOCOCK" "$VM_SKILL_VERCEL" > "$CAPTURE_FILE"
   return 1
 }
 export -f nix
@@ -28,10 +29,12 @@ cd "$TEMPORARY_DIRECTORY/workspace"
 
 check_configuration() {
   local configuration_directory="$1" expected_cpu="$2" expected_memory="$3"
+  local expected_anthropic="$4" expected_mattpocock="$5" expected_vercel="$6"
   local status=0
   bash "$RUNNER" > "$TEMPORARY_DIRECTORY/output" 2>&1 || status=$?
   [ "$status" -eq 1 ]
-  printf '%s\n' "$configuration_directory" "$expected_cpu" "$expected_memory" > "$TEMPORARY_DIRECTORY/expected"
+  printf '%s\n' "$configuration_directory" "$expected_cpu" "$expected_memory" \
+    "$expected_anthropic" "$expected_mattpocock" "$expected_vercel" > "$TEMPORARY_DIRECTORY/expected"
   if ! cmp --silent "$TEMPORARY_DIRECTORY/expected" "$CAPTURE_FILE"; then
     echo "FAIL: runner must read and share the current user configuration." >&2
     diff --unified "$TEMPORARY_DIRECTORY/expected" "$CAPTURE_FILE" >&2 || true
@@ -43,8 +46,9 @@ check_configuration() {
   fi
 }
 
-printf '%s\n' '{"vm":{"cpu":6,"mem":8192}}' > "$HOME/.config/aegis/config.json"
-check_configuration "$HOME/.config/aegis" 6 8192
+printf '%s\n' '{"cpu":6,"mem":8192}' > "$HOME/.config/aegis/vm.json"
+printf '%s\n' '{"anthropic":true}' > "$HOME/.config/aegis/skills.json"
+check_configuration "$HOME/.config/aegis" 6 8192 true false false
 for scaffolded_file in vm.json skills.json opencode.jsonc; do
   if [ ! -f "$HOME/.config/aegis/$scaffolded_file" ]; then
     echo "FAIL: runner must scaffold $scaffolded_file." >&2
@@ -71,14 +75,14 @@ done
 # An old workspace snapshot must not hide subsequent user configuration edits.
 for state_directory in "$XDG_STATE_HOME"/aegis/*; do
   mkdir --parents "$state_directory/.config/aegis"
-  printf '%s\n' '{"vm":{"cpu":1,"mem":1024}}' > "$state_directory/.config/aegis/config.json"
+  printf '%s\n' '{"cpu":1,"mem":1024}' > "$state_directory/.config/aegis/vm.json"
 done
-printf '%s\n' '{"vm":{"cpu":8,"mem":16384}}' > "$HOME/.config/aegis/config.json"
-check_configuration "$HOME/.config/aegis" 8 16384
+printf '%s\n' '{"cpu":8,"mem":16384}' > "$HOME/.config/aegis/vm.json"
+check_configuration "$HOME/.config/aegis" 8 16384 true false false
 
 export XDG_CONFIG_HOME="$TEMPORARY_DIRECTORY/custom configuration"
 mkdir --parents "$XDG_CONFIG_HOME/aegis"
-printf '%s\n' '{"vm":{"cpu":2,"mem":2048}}' > "$XDG_CONFIG_HOME/aegis/config.json"
-check_configuration "$XDG_CONFIG_HOME/aegis" 2 2048
+printf '%s\n' '{"cpu":2,"mem":2048}' > "$XDG_CONFIG_HOME/aegis/vm.json"
+check_configuration "$XDG_CONFIG_HOME/aegis" 2 2048 false false false
 
 echo "All runner configuration tests passed."

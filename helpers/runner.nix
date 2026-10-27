@@ -73,13 +73,13 @@ pkgs.writeShellApplication {
     MERGED="$(merge_json "$USER_CONFIG")"
 
     # 3. VM resource settings with defaults.
-    VM_CPU="$(printf '%s' "$MERGED" | jq -r '.vm.cpu // 4')"
-    VM_MEM="$(printf '%s' "$MERGED" | jq -r '.vm.mem // 4096')"
+    VM_CPU="$(jq -r '.cpu // 4' "$USER_CONFIG_DIR/vm.json")"
+    VM_MEM="$(jq -r '.mem // 4096' "$USER_CONFIG_DIR/vm.json")"
 
     # 4. Metis leaf skills, disabled by default.
-    VM_SKILL_ANTHROPIC="$(printf '%s' "$MERGED" | jq -r '.skills.anthropic // false')"
-    VM_SKILL_MATTPOCOCK="$(printf '%s' "$MERGED" | jq -r '.skills.mattpocock // false')"
-    VM_SKILL_VERCEL="$(printf '%s' "$MERGED" | jq -r '.skills.vercel // false')"
+    VM_SKILL_ANTHROPIC="$(jq -r '.anthropic // false' "$USER_CONFIG_DIR/skills.json")"
+    VM_SKILL_MATTPOCOCK="$(jq -r '.mattpocock // false' "$USER_CONFIG_DIR/skills.json")"
+    VM_SKILL_VERCEL="$(jq -r '.vercel // false' "$USER_CONFIG_DIR/skills.json")"
 
     # 5. Git identity, configuration first, host git configuration fallback.
     HOST_GIT_NAME="$(git config --global user.name 2>/dev/null || git config user.name 2>/dev/null || true)"
