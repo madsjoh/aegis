@@ -69,7 +69,6 @@ in
 
   users.users.agent = {
     isNormalUser = true;
-    extraGroups = [ "wheel" ];
     home = "/home/agent";
     shell = lib.getExe pkgs.bash;
   };

@@ -133,7 +133,11 @@ pkgs.writeShellApplication {
     if [ "$IS_DARWIN" != "true" ]; then
       echo "Starting the virtiofs daemons..."
       start_virtiofsd() {
-        local socket="$1" shared_dir="$2" log="$3"
+        local socket="$1" shared_dir="$2" log="$3" readonly_flag="''${4:-}"
+        local readonly_args=""
+        if [ "$readonly_flag" = "readonly" ]; then
+          readonly_args="--readonly"
+        fi
         (
           close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
           virtiofsd \
@@ -142,7 +146,8 @@ pkgs.writeShellApplication {
             --thread-pool-size 4 \
             --cache=auto \
             --translate-uid "guest:1000:$VM_HOST_UID:1" \
-            --translate-gid "guest:100:$VM_HOST_GID:1"
+            --translate-gid "guest:100:$VM_HOST_GID:1" \
+            $readonly_args
         ) &> "$log" &
         VIRTIOFSD_PIDS="$VIRTIOFSD_PIDS $!"
       }
@@ -157,10 +162,10 @@ pkgs.writeShellApplication {
         rm -f "$socket"
       done
       start_virtiofsd "$RUN_DIR/workspace.sock" "$HOST_WORKSPACE" "$RUN_DIR/virtiofsd-workspace.log"
-      start_virtiofsd "$RUN_DIR/config.sock" "$USER_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
+      start_virtiofsd "$RUN_DIR/config.sock" "$USER_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log" readonly
       start_virtiofsd "$RUN_DIR/opencode-state.sock" "$OPENCODE_STATE_DIR" "$RUN_DIR/virtiofsd-opencode-state.log"
       start_virtiofsd "$RUN_DIR/opencode-share.sock" "$OPENCODE_SHARE_DIR" "$RUN_DIR/virtiofsd-opencode-share.log"
-      start_virtiofsd "$RUN_DIR/gitconfig.sock" "$RUN_DIR/gitconfig" "$RUN_DIR/virtiofsd-gitconfig.log"
+      start_virtiofsd "$RUN_DIR/gitconfig.sock" "$RUN_DIR/gitconfig" "$RUN_DIR/virtiofsd-gitconfig.log" readonly
       for _ in $(seq 1 50); do
         ready=true
         for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do

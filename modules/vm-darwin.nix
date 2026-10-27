@@ -61,4 +61,15 @@ in
       ];
     };
   };
+
+  fileSystems."/aegis" = lib.mkVMOverride {
+    device = "config";
+    fsType = "virtiofs";
+    options = [ "ro" ];
+  };
+  fileSystems."/run/aegis/gitconfig" = lib.mkVMOverride {
+    device = "gitconfig";
+    fsType = "virtiofs";
+    options = [ "ro" ];
+  };
 }
