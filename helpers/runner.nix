@@ -11,7 +11,6 @@ pkgs.writeShellApplication {
   name = "aegis";
   runtimeInputs = with pkgs; [
     coreutils
-    git
     gnugrep
     jq
     nix
@@ -20,7 +19,6 @@ pkgs.writeShellApplication {
   ] ++ lib.optionals (!isDarwin) [ virtiofsd ];
   text = ''
     USER_CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/aegis"
-    USER_CONFIG="$USER_CONFIG_DIR/config.json"
 
     IS_DARWIN=${isDarwinShell}
     HOST_PWD="$(pwd)"
@@ -69,25 +67,16 @@ pkgs.writeShellApplication {
     IMAGE_LOCK_DESCRIPTOR=""
     install_cleanup_traps
 
-    # 2. Read the current user configuration on every run.
-    MERGED="$(merge_json "$USER_CONFIG")"
-
-    # 3. VM resource settings with defaults.
+    # 2. VM resource settings with defaults.
     VM_CPU="$(jq -r '.cpu // 4' "$USER_CONFIG_DIR/vm.json")"
     VM_MEM="$(jq -r '.mem // 4096' "$USER_CONFIG_DIR/vm.json")"
 
-    # 4. Metis leaf skills, disabled by default.
+    # 3. Metis leaf skills, disabled by default.
     VM_SKILL_ANTHROPIC="$(jq -r '.anthropic // false' "$USER_CONFIG_DIR/skills.json")"
     VM_SKILL_MATTPOCOCK="$(jq -r '.mattpocock // false' "$USER_CONFIG_DIR/skills.json")"
     VM_SKILL_VERCEL="$(jq -r '.vercel // false' "$USER_CONFIG_DIR/skills.json")"
 
-    # 5. Git identity, configuration first, host git configuration fallback.
-    HOST_GIT_NAME="$(git config --global user.name 2>/dev/null || git config user.name 2>/dev/null || true)"
-    HOST_GIT_EMAIL="$(git config --global user.email 2>/dev/null || git config user.email 2>/dev/null || true)"
-    VM_GIT_NAME="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.name // empty')" "$HOST_GIT_NAME")"
-    VM_GIT_EMAIL="$(resolve "$(printf '%s' "$MERGED" | jq -r '.git.email // empty')" "$HOST_GIT_EMAIL")"
-
-    # 6. Workspace-derived identifiers, the host wide SSH key, and the SSH
+    # 4. Workspace-derived identifiers, the host wide SSH key, and the SSH
     # transport details. Linux reaches the guest over vsock; macOS reaches it
     # over TCP through a forwarded host port.
     VM_MOUNT_TAG="ws_$(printf '%s' "$WORKSPACE_ID" | cut -c1-8)"
@@ -99,7 +88,17 @@ pkgs.writeShellApplication {
     mkdir -p "$USER_CONFIG_DIR/ssh"
     printf '%s\n' "$VM_SSH_PUBLIC_KEY" > "$USER_CONFIG_DIR/ssh/authorized_keys"
 
-    # 7. Export the environment consumed by the VM build.
+    # 5. Stage the host git configuration into the run directory so the guest
+    # can mount it read-only. An empty [user] section keeps git functional when
+    # the host has no global identity.
+    mkdir -p "$RUN_DIR/gitconfig"
+    if [ -f "$HOME/.gitconfig" ]; then
+      cp "$HOME/.gitconfig" "$RUN_DIR/gitconfig/.gitconfig"
+    else
+      printf '%s\n' '[user]' > "$RUN_DIR/gitconfig/.gitconfig"
+    fi
+
+    # 6. Export the environment consumed by the VM build.
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
@@ -107,15 +106,15 @@ pkgs.writeShellApplication {
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
-    export VM_GIT_NAME VM_GIT_EMAIL VM_CPU VM_MEM
+    export VM_CPU VM_MEM
     export VM_SKILL_ANTHROPIC VM_SKILL_MATTPOCOCK VM_SKILL_VERCEL
 
     echo "Aegis [Host: ${system} | Guest: ${guestSystem system}]"
     echo "Workspace : $HOST_PWD"
-    echo "Config    : $USER_CONFIG"
+    echo "Config    : $USER_CONFIG_DIR"
     echo "State     : $STATE_DIR"
 
-    # 8. Build the target VM.
+    # 7. Build the target VM.
     echo "Building the guest VM..."
     VM_PATH="$(nix build "${flakeRef}#aegis-vm-${system}" --impure --no-link --print-out-paths)"
     if [ "$IS_DARWIN" != "true" ]; then
@@ -129,7 +128,7 @@ pkgs.writeShellApplication {
       ')"
     fi
 
-    # 9. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
+    # 8. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
     # need no virtiofsd.
     if [ "$IS_DARWIN" != "true" ]; then
       echo "Starting the virtiofs daemons..."
@@ -152,6 +151,7 @@ pkgs.writeShellApplication {
         "$RUN_DIR/config.sock"
         "$RUN_DIR/opencode-state.sock"
         "$RUN_DIR/opencode-share.sock"
+        "$RUN_DIR/gitconfig.sock"
       )
       for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do
         rm -f "$socket"
@@ -160,6 +160,7 @@ pkgs.writeShellApplication {
       start_virtiofsd "$RUN_DIR/config.sock" "$USER_CONFIG_DIR" "$RUN_DIR/virtiofsd-config.log"
       start_virtiofsd "$RUN_DIR/opencode-state.sock" "$OPENCODE_STATE_DIR" "$RUN_DIR/virtiofsd-opencode-state.log"
       start_virtiofsd "$RUN_DIR/opencode-share.sock" "$OPENCODE_SHARE_DIR" "$RUN_DIR/virtiofsd-opencode-share.log"
+      start_virtiofsd "$RUN_DIR/gitconfig.sock" "$RUN_DIR/gitconfig" "$RUN_DIR/virtiofsd-gitconfig.log"
       for _ in $(seq 1 50); do
         ready=true
         for socket in "''${VIRTIOFSD_SOCKETS[@]}"; do
@@ -184,7 +185,7 @@ pkgs.writeShellApplication {
       done
     fi
 
-    # 10. Run the VM in the background.
+    # 9. Run the VM in the background.
     VM_LOG="$RUN_DIR/vm.log"
     echo "Booting the guest..."
     prepare_vm_log "$VM_LOG"
@@ -214,7 +215,7 @@ pkgs.writeShellApplication {
       IMAGE_LOCK_DESCRIPTOR=""
     fi
 
-    # 11. Wait for the guest SSH server.
+    # 10. Wait for the guest SSH server.
     SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 -o BatchMode=yes)
     if [ "$IS_DARWIN" = "true" ]; then
       SSH_TARGET=(-p "$VM_SSH_PORT" agent@127.0.0.1)
@@ -226,7 +227,7 @@ pkgs.writeShellApplication {
     echo "Waiting for the guest SSH server..."
     wait_for_ssh
 
-    # 12. Attach OpenCode over SSH.
+    # 11. Attach OpenCode over SSH.
     ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}" "exec /run/current-system/sw/bin/opencode-shell"
   '';
 }

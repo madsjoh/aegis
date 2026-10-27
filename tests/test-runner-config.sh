@@ -40,8 +40,8 @@ check_configuration() {
     diff --unified "$TEMPORARY_DIRECTORY/expected" "$CAPTURE_FILE" >&2 || true
     return 1
   fi
-  if ! grep --fixed-strings --quiet "Config    : $configuration_directory/config.json" "$TEMPORARY_DIRECTORY/output"; then
-    echo "FAIL: runner must display the user configuration file." >&2
+  if ! grep --fixed-strings --quiet "Config    : $configuration_directory" "$TEMPORARY_DIRECTORY/output"; then
+    echo "FAIL: runner must display the user configuration directory." >&2
     return 1
   fi
 }

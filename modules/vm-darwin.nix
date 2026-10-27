@@ -40,6 +40,11 @@ in
         source = "\"$HOST_STATE_DIR/opencode/share\"";
         target = "/home/agent/.local/share/opencode";
       };
+
+      gitconfig = {
+        source = "\"$HOST_STATE_DIR/run/gitconfig\"";
+        target = "/run/aegis/gitconfig";
+      };
     };
 
     vz = {

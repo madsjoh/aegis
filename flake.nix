@@ -117,6 +117,8 @@
             test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.cores}" = "1"
             test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.memorySize}" = "1024"
             test "${(nixpkgs.lib.findFirst (package: (package.pname or "") == "opencode") (throw "Guest OpenCode package is missing") self.nixosConfigurations.aegis-vm-aarch64-darwin.config.home-manager.users.agent.home.packages).version}" = "2.0.32"
+            test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.fileSystems."/run/aegis/gitconfig".options)}" = "1"
+            test "${builtins.toJSON self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.programs.git.settings}" = "{}"
             touch "$out"
           '';
         });

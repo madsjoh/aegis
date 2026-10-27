@@ -18,12 +18,14 @@ let
   configTag = "aegis-config";
   opencodeStateTag = "opencode-state";
   opencodeShareTag = "opencode-share";
+  gitconfigTag = "gitconfig";
   cid = envInt "VM_CID" 3;
 
   workspaceSocket = "${stateDir}/run/workspace.sock";
   configSocket = "${stateDir}/run/config.sock";
   opencodeStateSocket = "${stateDir}/run/opencode-state.sock";
   opencodeShareSocket = "${stateDir}/run/opencode-share.sock";
+  gitconfigSocket = "${stateDir}/run/gitconfig.sock";
 
   hostPkgs = config.virtualisation.host.pkgs;
   regInfo = hostPkgs.closureInfo { rootPaths = config.virtualisation.additionalPaths; };
@@ -69,6 +71,8 @@ in
       "-device vhost-user-fs-pci,chardev=char-${opencodeStateTag},tag=${opencodeStateTag}"
       "-chardev socket,id=char-${opencodeShareTag},path=${opencodeShareSocket}"
       "-device vhost-user-fs-pci,chardev=char-${opencodeShareTag},tag=${opencodeShareTag}"
+      "-chardev socket,id=char-${gitconfigTag},path=${gitconfigSocket}"
+      "-device vhost-user-fs-pci,chardev=char-${gitconfigTag},tag=${gitconfigTag}"
       "-device vhost-vsock-pci,guest-cid=${toString cid}"
     ];
   };
@@ -110,5 +114,11 @@ in
     device = opencodeShareTag;
     fsType = "virtiofs";
     options = [ "x-systemd.requires=modprobe@virtiofs.service" ];
+  };
+
+  virtualisation.fileSystems."/run/aegis/gitconfig" = {
+    device = gitconfigTag;
+    fsType = "virtiofs";
+    options = [ "ro" "x-systemd.requires=modprobe@virtiofs.service" ];
   };
 }
