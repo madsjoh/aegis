@@ -198,7 +198,9 @@ pkgs.writeShellApplication {
     else
       (
         close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
-        QEMU_KERNEL_PARAMS="regInfo=/nix/.ro-store/''${REG_INFO_BASENAME}/registration" "''${VM_PATH}/bin/run-aegis-vm" "$@"
+        QEMU_KERNEL_PARAMS="regInfo=/nix/.ro-store/''${REG_INFO_BASENAME}/registration" \
+          QEMU_OPTS="-smp ''${VM_CPU} -m ''${VM_MEM} -object memory-backend-memfd,id=aegis-ram,size=''${VM_MEM}M,share=on -machine memory-backend=aegis-ram" \
+          "''${VM_PATH}/bin/run-aegis-vm" "$@"
       ) &>> "$VM_LOG" &
     fi
     VM_PID=$!

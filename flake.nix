@@ -114,6 +114,8 @@
             test "${builtins.toString self.nixosConfigurations.aegis-vm-aarch64-linux.config.services.openssh.enable}" = "1"
             test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.systemd.services.aegis-ssh-keys.enable}" = "1"
             test "${builtins.toString (builtins.length self.nixosConfigurations.aegis-vm-x86_64-linux.config.users.users.agent.openssh.authorizedKeys.keys)}" = "0"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.cores}" = "1"
+            test "${builtins.toString self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.memorySize}" = "1024"
             test "${(nixpkgs.lib.findFirst (package: (package.pname or "") == "opencode") (throw "Guest OpenCode package is missing") self.nixosConfigurations.aegis-vm-aarch64-darwin.config.home-manager.users.agent.home.packages).version}" = "2.0.32"
             touch "$out"
           '';
