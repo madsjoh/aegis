@@ -97,6 +97,14 @@
             touch "$out"
           '';
 
+          scaffold = pkgs.runCommand "aegis-scaffold-test" {
+            buildInputs = [ pkgs.jq pkgs.coreutils ];
+          } ''
+            set -o errexit -o nounset -o pipefail
+            bash ${./tests/test-scaffold.sh} ${./helpers/scaffold.bash}
+            touch "$out"
+          '';
+
           wait-for-ssh = pkgs.runCommand "aegis-wait-for-ssh-test" { } ''
             set -o errexit -o nounset -o pipefail
             bash ${./tests/test-wait-for-ssh.sh} ${./helpers/wait-for-ssh.bash}
