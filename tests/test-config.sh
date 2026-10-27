@@ -29,8 +29,26 @@ else
   fail "resolve fails when no value is set"
 fi
 
+# merge_json skips missing files.
+if [ "$(merge_json "/nonexistent.json")" = "{}" ]; then
+  pass "merge_json returns an empty object for no files"
+else
+  fail "merge_json returns an empty object for no files"
+fi
+
 TMP="$(mktemp --directory)"
 trap 'rm --recursive --force "$TMP"' EXIT
+
+# merge_json lets later files win and preserves earlier keys.
+printf '%s\n' '{"git":{"name":"user"},"vm":{"cpu":4}}' > "$TMP/user.json"
+printf '%s\n' '{"vm":{"cpu":8}}' > "$TMP/workspace.json"
+MERGED="$(merge_json "$TMP/user.json" "$TMP/workspace.json")"
+if [ "$(printf '%s' "$MERGED" | jq -r '.vm.cpu')" = "8" ] \
+  && [ "$(printf '%s' "$MERGED" | jq -r '.git.name')" = "user" ]; then
+  pass "merge_json gives later files precedence"
+else
+  fail "merge_json gives later files precedence"
+fi
 
 # prepare_opencode forwards the OpenCode configuration verbatim, including
 # JSONC comments that OpenCode itself validates and strips.
@@ -52,7 +70,7 @@ else
   fail "prepare_opencode fails on a missing file"
 fi
 
-for removed_function in opencode_auth_entries import_opencode_auth merge_json; do
+for removed_function in opencode_auth_entries import_opencode_auth; do
   if declare -F "$removed_function" >/dev/null; then
     fail "$removed_function must be removed"
   else
