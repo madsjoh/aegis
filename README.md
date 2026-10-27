@@ -18,7 +18,7 @@ The `aegis` runner performs these steps when you launch it in a workspace:
 6. Attaches OpenCode, which runs inside the guest as the `agent` user.
 
 The guest mounts your workspace at `/workspace`, the configuration at `/aegis`,
-and the host Git configuration read-only at `/run/aegis/gitconfig`. OpenCode
+and a copy of the host Git configuration at `/run/aegis/gitconfig`. OpenCode
 therefore sees and edits the same files you do on the host, but every command
 it runs executes inside the VM.
 
@@ -193,9 +193,11 @@ Here is an example `opencode.jsonc`:
 ```
 
 Git identity comes from the host's `~/.gitconfig`. Aegis copies it into the run
-directory and mounts it read-only at `/run/aegis/gitconfig/.gitconfig`. When the
-host has no global configuration, the guest receives an empty `[user]` section
-so Git remains functional.
+directory each run, so the host's real file is never exposed to the guest, and
+mounts the copy at `/run/aegis/gitconfig/.gitconfig`. The mount is read-only on
+Linux. The macOS VZ backend cannot mark a share read-only, so the staged copy
+is writable there. When the host has no global configuration, the guest
+receives an empty `[user]` section so Git remains functional.
 
 Host wide data lives under `~/.local/share/aegis`. This directory contains the
 persisted `ssh_host_ed25519` key used by every workspace. On macOS, closure keyed
