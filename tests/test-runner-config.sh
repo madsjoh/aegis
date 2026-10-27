@@ -45,6 +45,22 @@ check_configuration() {
 
 printf '%s\n' '{"vm":{"cpu":6,"mem":8192}}' > "$HOME/.config/aegis/config.json"
 check_configuration "$HOME/.config/aegis" 6 8192
+for scaffolded_file in vm.json skills.json opencode.jsonc; do
+  if [ ! -f "$HOME/.config/aegis/$scaffolded_file" ]; then
+    echo "FAIL: runner must scaffold $scaffolded_file." >&2
+    exit 1
+  fi
+done
+
+if bash "$RUNNER" init > "$TEMPORARY_DIRECTORY/init-output" 2>&1; then
+  echo "FAIL: the init command must no longer exist." >&2
+  exit 1
+elif ! grep --fixed-strings --quiet "unknown command 'init'" "$TEMPORARY_DIRECTORY/init-output"; then
+  echo "FAIL: init must report an unknown command." >&2
+  cat "$TEMPORARY_DIRECTORY/init-output" >&2
+  exit 1
+fi
+
 for workspace_configuration in "$XDG_STATE_HOME"/aegis/*/.config/aegis/config.json; do
   if [ -f "$workspace_configuration" ]; then
     echo "FAIL: runner must not create a workspace configuration snapshot." >&2

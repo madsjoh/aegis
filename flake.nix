@@ -91,12 +91,6 @@
             touch "$out"
           '';
 
-          init = pkgs.runCommand "aegis-init-test" { buildInputs = [ pkgs.jq ]; } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-init.sh} ${./helpers/init.bash}
-            touch "$out"
-          '';
-
           scaffold = pkgs.runCommand "aegis-scaffold-test" {
             buildInputs = [ pkgs.jq pkgs.coreutils ];
           } ''
