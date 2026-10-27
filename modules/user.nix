@@ -20,38 +20,11 @@ let
 
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
-    runtimeInputs = with pkgs; [ coreutils git jq opencode ];
+    runtimeInputs = with pkgs; [ coreutils opencode ];
     text = ''
       ${builtins.readFile ../helpers/config.bash}
 
-      USER_CONFIG="/aegis/config.json"
-
-      MERGED="$(mktemp)"
-      cleanup_merged() { rm -f "$MERGED"; }
-      trap cleanup_merged EXIT
-
-      merge_json "$USER_CONFIG" > "$MERGED"
-
-      GITHUB_TOKEN_VALUE="$(jq -r '.github.token // empty' "$MERGED")"
-      if [ -n "$GITHUB_TOKEN_VALUE" ]; then
-        export GH_TOKEN="$GITHUB_TOKEN_VALUE"
-      fi
-
-      GIT_NAME_VALUE="$(resolve "$(jq -r '.git.name // empty' "$MERGED")" "${builtins.getEnv "VM_GIT_NAME"}")"
-      GIT_EMAIL_VALUE="$(resolve "$(jq -r '.git.email // empty' "$MERGED")" "${builtins.getEnv "VM_GIT_EMAIL"}")"
-      if [ -n "$GIT_NAME_VALUE" ]; then
-        export GIT_AUTHOR_NAME="$GIT_NAME_VALUE"
-        export GIT_COMMITTER_NAME="$GIT_NAME_VALUE"
-      fi
-      if [ -n "$GIT_EMAIL_VALUE" ]; then
-        export GIT_AUTHOR_EMAIL="$GIT_EMAIL_VALUE"
-        export GIT_COMMITTER_EMAIL="$GIT_EMAIL_VALUE"
-      fi
-
-      prepare_opencode "$MERGED"
-
-      rm -f "$MERGED"
-      trap - EXIT
+      prepare_opencode "/aegis/opencode.jsonc"
 
       cd /workspace
       exec opencode /workspace
