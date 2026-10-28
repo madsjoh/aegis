@@ -28,6 +28,18 @@ cleanup() {
   for pid in $virtiofsd_pids; do
     kill "$pid" 2>/dev/null || true
   done
+  if [ -n "${GATEWAY_PID:-}" ]; then
+    pid="$GATEWAY_PID"
+    GATEWAY_PID=""
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  if [ -n "${TUNNEL_PID:-}" ]; then
+    pid="$TUNNEL_PID"
+    TUNNEL_PID=""
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
   if [ -n "$IMAGE_LOCK_DESCRIPTOR" ]; then
     descriptor="$IMAGE_LOCK_DESCRIPTOR"
     IMAGE_LOCK_DESCRIPTOR=""

@@ -109,6 +109,14 @@
             touch "$out"
           '';
 
+          gateway-orchestration = pkgs.runCommand "aegis-gateway-orchestration-test" {
+            buildInputs = [ pkgs.gnugrep ];
+          } ''
+            grep --fixed-strings --quiet 'ensure-ca' ${self.packages.${system}.default}/bin/aegis
+            grep --fixed-strings --quiet -- '-R "3128:127.0.0.1:$VM_PROXY_HOST_PORT"' ${self.packages.${system}.default}/bin/aegis
+            touch "$out"
+          '';
+
           scaffold = pkgs.runCommand "aegis-scaffold-test" {
             buildInputs = [ pkgs.jq pkgs.coreutils ];
           } ''

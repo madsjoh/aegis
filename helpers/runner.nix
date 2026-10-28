@@ -64,6 +64,9 @@ pkgs.writeShellApplication {
     fi
     VM_PID=""
     VIRTIOFSD_PIDS=""
+    GATEWAY_PID=""
+    TUNNEL_PID=""
+    GATEWAY_ENABLED=""
     IMAGE_LOCK_DESCRIPTOR=""
     install_cleanup_traps
 
@@ -88,6 +91,20 @@ pkgs.writeShellApplication {
     mkdir -p "$USER_CONFIG_DIR/ssh"
     printf '%s\n' "$VM_SSH_PUBLIC_KEY" > "$USER_CONFIG_DIR/ssh/authorized_keys"
 
+    # Provision the gateway CA and certificate when the workspace carries sops
+    # secrets. The guest proxy port is fixed and matches the guest default; the
+    # host port is derived from the workspace CID like the SSH port. Without a
+    # secrets.yaml, nothing is exported and the runner behaves exactly as before.
+    VM_PROXY_PORT=3128
+    VM_PROXY_HOST_PORT=$(( 21000 + VM_CID ))
+    if [ -f "$USER_CONFIG_DIR/secrets.yaml" ]; then
+      echo "Provisioning the gateway CA..."
+      GATEWAY_PATH="$(nix build "${flakeRef}#aegis-gateway" --impure --no-link --print-out-paths)"
+      AGE_KEY_FILE="''${XDG_CONFIG_HOME:-$HOME/.config}/sops/age/keys.txt"
+      "$GATEWAY_PATH/bin/aegis-gateway" ensure-ca --ca-dir "$DATA_DIR/ca" --cert-out "$USER_CONFIG_DIR/ca.crt"
+      GATEWAY_ENABLED=1
+    fi
+
     # 5. Stage the host git configuration into the run directory so the guest
     # can mount it read-only. An empty [user] section keeps git functional when
     # the host has no global identity.
@@ -102,7 +119,7 @@ pkgs.writeShellApplication {
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
-    export VM_MOUNT_TAG VM_CID VM_SSH_PORT
+    export VM_MOUNT_TAG VM_CID VM_SSH_PORT VM_PROXY_PORT
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
@@ -190,6 +207,20 @@ pkgs.writeShellApplication {
       done
     fi
 
+    # Start the gateway proxy in the background when secrets are present.
+    if [ -n "$GATEWAY_ENABLED" ]; then
+      echo "Starting the gateway proxy..."
+      (
+        close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
+        "$GATEWAY_PATH/bin/aegis-gateway" serve \
+          --listen "127.0.0.1:$VM_PROXY_HOST_PORT" \
+          --ca-dir "$DATA_DIR/ca" \
+          --secrets "$USER_CONFIG_DIR/secrets.yaml" \
+          --age-key "$AGE_KEY_FILE"
+      ) &> "$RUN_DIR/gateway.log" &
+      GATEWAY_PID=$!
+    fi
+
     # 9. Run the VM in the background.
     VM_LOG="$RUN_DIR/vm.log"
     echo "Booting the guest..."
@@ -231,6 +262,15 @@ pkgs.writeShellApplication {
     fi
     echo "Waiting for the guest SSH server..."
     wait_for_ssh
+
+    # Hold a reverse tunnel so the guest reaches the gateway on port 3128.
+    if [ -n "$GATEWAY_ENABLED" ]; then
+      (
+        close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
+        ssh -N -R "3128:127.0.0.1:$VM_PROXY_HOST_PORT" "''${SSH_OPTS[@]}" "''${SSH_TARGET[@]}"
+      ) &> "$RUN_DIR/reverse-tunnel.log" &
+      TUNNEL_PID=$!
+    fi
 
     # 11. Attach OpenCode over SSH.
     ssh -tt -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "''${SSH_TARGET[@]}" "exec /run/current-system/sw/bin/opencode-shell"
