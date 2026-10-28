@@ -225,13 +225,13 @@ async fn mitm(
     let acceptor = TlsAcceptor::from(mitm_server_config(Arc::clone(&authority)));
     let tls = acceptor.accept(TokioIo::new(upgraded)).await?;
 
-    let client = upstream_client(&authority);
+    let clients = upstream_clients(&authority);
 
     let service = service_fn(move |req| {
         let rule = rule.clone();
         let target = target.clone();
-        let client = client.clone();
-        async move { handle_inner_request(req, rule, target, client).await }
+        let clients = clients.clone();
+        async move { handle_inner_request(req, rule, target, clients).await }
     });
 
     auto::Builder::new(TokioExecutor::new())
@@ -246,10 +246,10 @@ async fn handle_inner_request(
     mut req: Request<Incoming>,
     rule: Rule,
     target: String,
-    client: UpstreamClient,
+    clients: UpstreamClients,
 ) -> Result<Response<BoxBody>, BoxError> {
     let Some(rewritten) = rewrite_request_header(&req, &rule) else {
-        return forward_over_tls(req, target, client).await;
+        return forward_over_tls(req, target, clients).await;
     };
 
     if let Some(policy) = &rule.policy {
@@ -260,7 +260,7 @@ async fn handle_inner_request(
     }
 
     set_header(&mut req, &rule.auth_header, rewritten)?;
-    forward_over_tls(req, target, client).await
+    forward_over_tls(req, target, clients).await
 }
 
 /// Return the rewritten header value, or `None` when the header is absent or
@@ -279,15 +279,19 @@ fn set_header(req: &mut Request<Incoming>, name: &str, value: String) -> Result<
     Ok(())
 }
 
-/// Forward a decrypted request upstream over TLS, negotiating HTTP/2 or
-/// HTTP/1.1 through ALPN.
+/// Forward a decrypted request upstream over TLS, selecting the upstream
+/// protocol from the request version so it matches the MITM-leg protocol.
 async fn forward_over_tls(
     req: Request<Incoming>,
     target: String,
-    client: UpstreamClient,
+    clients: UpstreamClients,
 ) -> Result<Response<BoxBody>, BoxError> {
     let mut req = req;
     *req.uri_mut() = absolute_uri(&target, req.uri())?;
+    let client = match req.version() {
+        http::Version::HTTP_2 => &clients.http2,
+        _ => &clients.http1,
+    };
     let response = client
         .request(req)
         .await
@@ -306,12 +310,28 @@ fn absolute_uri(authority: &str, uri: &Uri) -> Result<Uri, BoxError> {
         .map_err(BoxError::from_error)
 }
 
-/// The upstream HTTP client, which negotiates HTTP/1.1 or HTTP/2 through ALPN.
+/// The upstream HTTP client, which negotiates the protocol offered over ALPN.
 type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, Incoming>;
 
-/// Build the client that forwards decrypted requests upstream.
-fn upstream_client(authority: &Authority) -> UpstreamClient {
-    let connector = UpstreamConnector::new(upstream_tls_connector(authority));
+/// The upstream clients, one per supported protocol version, so the upstream
+/// connection matches the request version.
+#[derive(Clone)]
+struct UpstreamClients {
+    http1: UpstreamClient,
+    http2: UpstreamClient,
+}
+
+/// Build the HTTP/1.1 and HTTP/2 upstream clients.
+fn upstream_clients(authority: &Authority) -> UpstreamClients {
+    UpstreamClients {
+        http1: upstream_client(authority, &[b"http/1.1"]),
+        http2: upstream_client(authority, &[b"h2"]),
+    }
+}
+
+/// Build one upstream client offering the given ALPN protocols.
+fn upstream_client(authority: &Authority, alpn: &[&[u8]]) -> UpstreamClient {
+    let connector = UpstreamConnector::new(upstream_tls_connector(authority, alpn));
     hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector)
 }
 
@@ -531,19 +551,20 @@ fn upstream_root_store(authority: &Authority) -> rustls::RootCertStore {
     roots
 }
 
-/// The TLS connector the gateway uses when re-encrypting upstream.
+/// The TLS connector the gateway uses when re-encrypting upstream, offering the
+/// given ALPN protocols.
 ///
 /// The gateway CA is trusted so that a local upstream minted by the same
 /// authority verifies in tests, and the platform trust store is trusted so
 /// real upstreams verify too.
-fn upstream_tls_connector(authority: &Authority) -> Arc<TlsConnector> {
+fn upstream_tls_connector(authority: &Authority, alpn: &[&[u8]]) -> Arc<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .expect("supported protocol versions")
         .with_root_certificates(upstream_root_store(authority))
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
 
     Arc::new(TlsConnector::from(Arc::new(config)))
 }
@@ -770,6 +791,57 @@ mod tests {
         });
 
         let _ = server_http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(tls), service)
+            .await;
+    }
+
+    /// Start a local upstream that advertises both `h2` and `http/1.1` over
+    /// ALPN and whose response body echoes the request version and the
+    /// authorization header.
+    async fn start_dual_upstream(authority: &Authority) -> SocketAddr {
+        let certified = authority.leaf_certified_key("localhost").expect("leaf");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("supported protocol versions")
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(FixedResolver { certified }));
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let tls = acceptor.accept(stream).await.expect("tls accept");
+                    serve_dual_echo(tls).await;
+                });
+            }
+        });
+
+        addr
+    }
+
+    /// Serve HTTP/1.1 or HTTP/2 requests, echoing the request version and the
+    /// authorization header in the body.
+    async fn serve_dual_echo(tls: TlsStream<TcpStream>) {
+        let service = service_fn(|req: Request<Incoming>| async move {
+            let authorization = req
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = format!("version={:?} auth={authorization}", req.version());
+            Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from(body))))
+        });
+
+        let _ = auto::Builder::new(TokioExecutor::new())
             .serve_connection(TokioIo::new(tls), service)
             .await;
     }
@@ -1024,6 +1096,39 @@ mod tests {
             .to_bytes();
 
         let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(SECRET), "response: {text}");
+        assert!(!text.contains(PLACEHOLDER), "response: {text}");
+    }
+
+    #[tokio::test]
+    async fn matched_host_over_h1_to_h2_capable_upstream_is_rewritten() {
+        let dir = temp_dir("h1-to-h2-upstream");
+        let authority = Arc::new(Authority::load_or_create(&dir).expect("authority"));
+        let ca_pem = authority.ca_pem();
+
+        let upstream_addr = start_dual_upstream(&authority).await;
+        let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
+
+        let proxy_addr = ephemeral_addr().await;
+        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+
+        let target = format!("localhost:{}", upstream_addr.port());
+        let request = format!(
+            "GET /echo HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {PLACEHOLDER}\r\nConnection: close\r\n\r\n"
+        );
+        let response = connect_via_proxy(
+            proxy_addr,
+            &target,
+            "localhost",
+            &ca_pem,
+            request.as_bytes(),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&response);
+
+        assert!(text.starts_with("HTTP/1.1 200"), "response: {text}");
+        assert!(text.contains("version=HTTP/1.1"), "response: {text}");
+        assert!(!text.contains("version=HTTP/2"), "response: {text}");
         assert!(text.contains(SECRET), "response: {text}");
         assert!(!text.contains(PLACEHOLDER), "response: {text}");
     }
