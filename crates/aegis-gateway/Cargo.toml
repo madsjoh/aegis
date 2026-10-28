@@ -13,6 +13,7 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 rustls = { workspace = true, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = { workspace = true }
 rustls-pemfile = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }

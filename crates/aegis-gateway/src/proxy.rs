@@ -386,24 +386,36 @@ impl ResolvesServerCert for CertificateResolver {
     }
 }
 
-/// The TLS connector the gateway uses when re-encrypting upstream.
-///
-/// The gateway CA is trusted so that a local upstream minted by the same
-/// authority verifies in tests. Reaching real upstreams requires the platform
-/// trust store, which a later task must add.
-fn upstream_tls_connector(authority: &Authority) -> Arc<TlsConnector> {
+/// Build the root store for upstream connections: the gateway CA plus the
+/// platform trust store.
+fn upstream_root_store(authority: &Authority) -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
 
+    // The gateway CA so gateway-signed local upstreams verify.
     let mut pem = std::io::Cursor::new(authority.ca_pem());
     for certificate in rustls_pemfile::certs(&mut pem).flatten() {
         let _ = roots.add(certificate);
     }
 
+    // Platform roots so real upstreams verify. Loading is best-effort: an empty
+    // or unreadable store simply means only gateway-signed upstreams verify.
+    let native = rustls_native_certs::load_native_certs();
+    let _ = roots.add_parsable_certificates(native.certs);
+
+    roots
+}
+
+/// The TLS connector the gateway uses when re-encrypting upstream.
+///
+/// The gateway CA is trusted so that a local upstream minted by the same
+/// authority verifies in tests, and the platform trust store is trusted so
+/// real upstreams verify too.
+fn upstream_tls_connector(authority: &Authority) -> Arc<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .expect("supported protocol versions")
-        .with_root_certificates(roots)
+        .with_root_certificates(upstream_root_store(authority))
         .with_no_client_auth();
 
     Arc::new(TlsConnector::from(Arc::new(config)))
@@ -642,6 +654,34 @@ mod tests {
         let mut response = Vec::new();
         tls.read_to_end(&mut response).await.expect("read response");
         response
+    }
+
+    #[test]
+    fn upstream_root_store_seeds_gateway_ca_and_platform_roots() {
+        let dir = temp_dir("roots");
+        let authority = Authority::load_or_create(&dir).expect("authority");
+
+        let gateway_certs = rustls_pemfile::certs(&mut std::io::Cursor::new(authority.ca_pem()))
+            .flatten()
+            .count();
+
+        let native = rustls_native_certs::load_native_certs();
+
+        let store = upstream_root_store(&authority);
+
+        // The gateway CA is always present, so gateway-signed upstreams verify.
+        assert!(
+            store.roots.len() >= gateway_certs,
+            "gateway CA missing from the upstream root store"
+        );
+
+        // Platform roots, when the host has any, are loaded too.
+        if !native.certs.is_empty() {
+            assert!(
+                store.roots.len() > gateway_certs,
+                "platform roots missing from the upstream root store"
+            );
+        }
     }
 
     #[tokio::test]
