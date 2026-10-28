@@ -9,6 +9,16 @@ let
     in
     if value == "" then default else builtins.fromJSON value;
 
+  envStr = name: default:
+    let
+      value = builtins.getEnv name;
+    in
+    if value == "" then default else value;
+
+  proxyPort = envStr "VM_PROXY_PORT" "3128";
+  proxyUrl = "http://127.0.0.1:${proxyPort}";
+  caBundle = "/run/aegis/ca-bundle.crt";
+
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
     runtimeInputs = with pkgs; [ coreutils opencode ];
@@ -18,6 +28,17 @@ let
       prepare_opencode "/aegis/opencode.jsonc"
 
       export GIT_CONFIG_GLOBAL=/run/aegis/gitconfig/.gitconfig
+
+      export HTTPS_PROXY="${proxyUrl}"
+      export HTTP_PROXY="${proxyUrl}"
+      export ALL_PROXY="${proxyUrl}"
+      export https_proxy="${proxyUrl}"
+      export http_proxy="${proxyUrl}"
+      export all_proxy="${proxyUrl}"
+      export SSL_CERT_FILE="${caBundle}"
+      export GIT_SSL_CAINFO="${caBundle}"
+      export NIX_SSL_CERT_FILE="${caBundle}"
+      export NODE_EXTRA_CA_CERTS="/aegis/ca.crt"
 
       cd /workspace
       exec opencode /workspace
@@ -126,6 +147,16 @@ in
 
       home.sessionVariables = {
         JAVA_HOME = "${pkgs.temurin-bin-27.home}";
+        HTTPS_PROXY = proxyUrl;
+        HTTP_PROXY = proxyUrl;
+        ALL_PROXY = proxyUrl;
+        https_proxy = proxyUrl;
+        http_proxy = proxyUrl;
+        all_proxy = proxyUrl;
+        SSL_CERT_FILE = caBundle;
+        GIT_SSL_CAINFO = caBundle;
+        NIX_SSL_CERT_FILE = caBundle;
+        NODE_EXTRA_CA_CERTS = "/aegis/ca.crt";
       };
 
       home.stateVersion = "24.05";

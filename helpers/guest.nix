@@ -16,6 +16,7 @@ nixpkgs.lib.nixosSystem {
     (import ../modules/vm-common.nix)
     (import ../modules/user.nix { inherit metis; })
     (import ../modules/services.nix)
+    (import ../modules/ca-trust.nix)
     ({ ... }: {
       virtualisation.host.pkgs = nixpkgs.legacyPackages.${hostSystem};
     })
