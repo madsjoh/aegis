@@ -3,8 +3,6 @@
 //! Replaces a placeholder credential in a header value with its real secret,
 //! including the password field of HTTP basic authentication.
 
-#![allow(dead_code)]
-
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 

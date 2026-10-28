@@ -41,6 +41,11 @@ pub enum BuildError {
 }
 
 impl TokenTable {
+    /// Build a token table from an explicit rule list.
+    pub fn new(rules: Vec<Rule>) -> TokenTable {
+        TokenTable { rules }
+    }
+
     /// Build a token table from the catalog, secrets, and a credential selection.
     pub fn build(secrets: &SecretsFile, selection: &Selection) -> Result<TokenTable, BuildError> {
         let mut rules = Vec::new();
