@@ -6,7 +6,9 @@
 
 use std::error::Error;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue};
@@ -16,6 +18,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use rustls::pki_types::ServerName;
@@ -24,6 +27,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
+use tower_service::Service;
 
 use aegis_core::ca::Authority;
 use aegis_core::policy::Decision;
@@ -175,8 +179,7 @@ async fn handle_connect(
         tokio::spawn(async move {
             match on_upgrade.await {
                 Ok(upgraded) => {
-                    if let Err(err) = mitm(upgraded, target, lowercase_host, rule, authority).await
-                    {
+                    if let Err(err) = mitm(upgraded, target, rule, authority).await {
                         tracing::debug!("mitm connection failed: {err}");
                     }
                 }
@@ -211,25 +214,24 @@ async fn handle_connect(
     Ok(connection_established())
 }
 
-/// Terminate TLS for a matched host and serve the decrypted HTTP/1.1 requests.
+/// Terminate TLS for a matched host and serve the decrypted HTTP/1.1 or
+/// HTTP/2 requests.
 async fn mitm(
     upgraded: hyper::upgrade::Upgraded,
     target: String,
-    host: String,
     rule: Rule,
     authority: Arc<Authority>,
 ) -> Result<(), BoxError> {
     let acceptor = TlsAcceptor::from(mitm_server_config(Arc::clone(&authority)));
     let tls = acceptor.accept(TokioIo::new(upgraded)).await?;
 
-    let connector = upstream_tls_connector(&authority);
+    let client = upstream_client(&authority);
 
     let service = service_fn(move |req| {
         let rule = rule.clone();
         let target = target.clone();
-        let host = host.clone();
-        let connector = Arc::clone(&connector);
-        async move { handle_inner_request(req, rule, target, host, connector).await }
+        let client = client.clone();
+        async move { handle_inner_request(req, rule, target, client).await }
     });
 
     auto::Builder::new(TokioExecutor::new())
@@ -244,11 +246,10 @@ async fn handle_inner_request(
     mut req: Request<Incoming>,
     rule: Rule,
     target: String,
-    host: String,
-    connector: Arc<TlsConnector>,
+    client: UpstreamClient,
 ) -> Result<Response<BoxBody>, BoxError> {
     let Some(rewritten) = rewrite_request_header(&req, &rule) else {
-        return forward_over_tls(req, target, host, connector).await;
+        return forward_over_tls(req, target, client).await;
     };
 
     if let Some(policy) = &rule.policy {
@@ -259,7 +260,7 @@ async fn handle_inner_request(
     }
 
     set_header(&mut req, &rule.auth_header, rewritten)?;
-    forward_over_tls(req, target, host, connector).await
+    forward_over_tls(req, target, client).await
 }
 
 /// Return the rewritten header value, or `None` when the header is absent or
@@ -278,17 +279,142 @@ fn set_header(req: &mut Request<Incoming>, name: &str, value: String) -> Result<
     Ok(())
 }
 
-/// Open a TLS connection to `target` and forward the request over it.
+/// Forward a decrypted request upstream over TLS, negotiating HTTP/2 or
+/// HTTP/1.1 through ALPN.
 async fn forward_over_tls(
     req: Request<Incoming>,
     target: String,
-    host: String,
-    connector: Arc<TlsConnector>,
+    client: UpstreamClient,
 ) -> Result<Response<BoxBody>, BoxError> {
-    let stream = TcpStream::connect(&target).await?;
-    let server_name = server_name(&host)?;
-    let tls = connector.connect(server_name, stream).await?;
-    send_request_over(req, tls).await
+    let mut req = req;
+    *req.uri_mut() = absolute_uri(&target, req.uri())?;
+    let response = client
+        .request(req)
+        .await
+        .map_err(BoxError::from_error)?;
+    Ok(response.map(|body| body.map_err(into_box).boxed()))
+}
+
+/// Convert an origin-form URI into absolute form for `https://{authority}`.
+fn absolute_uri(authority: &str, uri: &Uri) -> Result<Uri, BoxError> {
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    http::Uri::builder()
+        .scheme("https")
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .map_err(BoxError::from_error)
+}
+
+/// The upstream HTTP client, which negotiates HTTP/1.1 or HTTP/2 through ALPN.
+type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, Incoming>;
+
+/// Build the client that forwards decrypted requests upstream.
+fn upstream_client(authority: &Authority) -> UpstreamClient {
+    let connector = UpstreamConnector::new(upstream_tls_connector(authority));
+    hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector)
+}
+
+/// A connector that opens a TLS connection to the request authority and
+/// reports the negotiated ALPN protocol so the client speaks HTTP/2 when the
+/// upstream selects it.
+#[derive(Clone)]
+struct UpstreamConnector {
+    tls: Arc<TlsConnector>,
+}
+
+impl UpstreamConnector {
+    fn new(tls: Arc<TlsConnector>) -> Self {
+        Self { tls }
+    }
+}
+
+impl Service<Uri> for UpstreamConnector {
+    type Response = UpstreamIo;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn std::future::Future<Output = Result<UpstreamIo, BoxError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, dst: Uri) -> Self::Future {
+        let tls = Arc::clone(&self.tls);
+        Box::pin(async move {
+            let authority = dst.authority().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "uri has no authority")
+            })?;
+            let target = authority.as_str().to_string();
+            let host = authority.host().to_string();
+
+            let stream = TcpStream::connect(&target).await?;
+            let server_name = server_name(&host)?;
+            let tls_stream = tls.connect(server_name, stream).await?;
+            let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
+
+            Ok(UpstreamIo {
+                inner: TokioIo::new(tls_stream),
+                negotiated_h2,
+            })
+        })
+    }
+}
+
+/// The upstream transport, which reports the negotiated protocol to the client.
+struct UpstreamIo {
+    inner: TokioIo<tokio_rustls::client::TlsStream<TcpStream>>,
+    negotiated_h2: bool,
+}
+
+impl Connection for UpstreamIo {
+    fn connected(&self) -> Connected {
+        let connected = Connected::new();
+        if self.negotiated_h2 {
+            connected.negotiated_h2()
+        } else {
+            connected
+        }
+    }
+}
+
+impl hyper::rt::Read for UpstreamIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for UpstreamIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
 }
 
 /// Handle an absolute-form request by forwarding it over plain HTTP.
@@ -359,7 +485,7 @@ fn mitm_server_config(authority: Arc<Authority>) -> Arc<rustls::ServerConfig> {
         .expect("supported protocol versions")
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(CertificateResolver { authority }));
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Arc::new(config)
 }
 
@@ -412,11 +538,12 @@ fn upstream_root_store(authority: &Authority) -> rustls::RootCertStore {
 /// real upstreams verify too.
 fn upstream_tls_connector(authority: &Authority) -> Arc<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .expect("supported protocol versions")
         .with_root_certificates(upstream_root_store(authority))
         .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Arc::new(TlsConnector::from(Arc::new(config)))
 }
@@ -469,6 +596,8 @@ mod tests {
 
     use aegis_core::policy::GithubPolicy;
     use aegis_core::token_table::Rule;
+    use hyper::client::conn::http2 as client_http2;
+    use hyper::server::conn::http2 as server_http2;
     use rustls::server::ResolvesServerCert;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -595,6 +724,54 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// Start a local HTTP/2 upstream that advertises `h2` over ALPN and whose
+    /// response body echoes the request authorization header.
+    async fn start_h2_upstream(authority: &Authority) -> SocketAddr {
+        let certified = authority.leaf_certified_key("localhost").expect("leaf");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("supported protocol versions")
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(FixedResolver { certified }));
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let tls = acceptor.accept(stream).await.expect("tls accept");
+                    serve_h2_echo(tls).await;
+                });
+            }
+        });
+
+        addr
+    }
+
+    /// Serve HTTP/2 requests and echo the authorization header in the body.
+    async fn serve_h2_echo(tls: TlsStream<TcpStream>) {
+        let service = service_fn(|req: Request<Incoming>| async move {
+            let authorization = req
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from(authorization))))
+        });
+
+        let _ = server_http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(tls), service)
+            .await;
     }
 
     /// Retry connecting until the freshly spawned proxy has bound its listener.
@@ -771,5 +948,83 @@ mod tests {
         assert!(text.contains("Host: localhost"), "response: {text}");
         assert!(text.contains(PLACEHOLDER), "response: {text}");
         assert!(!text.contains(SECRET), "response: {text}");
+    }
+
+    #[tokio::test]
+    async fn matched_host_over_h2_is_rewritten() {
+        let dir = temp_dir("h2");
+        let authority = Arc::new(Authority::load_or_create(&dir).expect("authority"));
+        let ca_pem = authority.ca_pem();
+
+        let upstream_addr = start_h2_upstream(&authority).await;
+        let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
+
+        let proxy_addr = ephemeral_addr().await;
+        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+
+        let target = format!("localhost:{}", upstream_addr.port());
+
+        let mut stream = connect_with_retry(proxy_addr).await;
+        let connect = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+        stream.write_all(connect.as_bytes()).await.expect("write");
+
+        let mut head = Vec::new();
+        read_until_double_crlf(&mut stream, &mut head).await;
+        assert!(
+            head.starts_with(b"HTTP/1.1 200"),
+            "unexpected CONNECT response: {}",
+            String::from_utf8_lossy(&head)
+        );
+
+        let mut roots = rustls::RootCertStore::empty();
+        let mut ca_reader = std::io::Cursor::new(ca_pem);
+        for certificate in rustls_pemfile::certs(&mut ca_reader).flatten() {
+            roots.add(certificate).expect("root");
+        }
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("supported protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let connector = TlsConnector::from(Arc::new(config));
+        let server_name = ServerName::try_from("localhost".to_string()).expect("server name");
+        let tls = connector
+            .connect(server_name, stream)
+            .await
+            .expect("tls connect");
+        assert_eq!(
+            tls.get_ref().1.alpn_protocol(),
+            Some(&b"h2"[..]),
+            "MITM leg did not negotiate h2"
+        );
+
+        let (mut sender, conn) = client_http2::Builder::new(TokioExecutor::new())
+            .handshake::<_, Empty<Bytes>>(TokioIo::new(tls))
+            .await
+            .expect("h2 handshake");
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("https://{target}/echo"))
+            .header("authorization", format!("Bearer {PLACEHOLDER}"))
+            .body(Empty::<Bytes>::new())
+            .expect("request");
+        let response = sender.send_request(request).await.expect("send request");
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read body")
+            .to_bytes();
+
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(SECRET), "response: {text}");
+        assert!(!text.contains(PLACEHOLDER), "response: {text}");
     }
 }
