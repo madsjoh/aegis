@@ -1,6 +1,3 @@
-mod proxy;
-mod rewrite;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +8,7 @@ use aegis_core::ca::Authority;
 use aegis_core::secrets::{decrypt, AgeSource};
 use aegis_core::token_table::{Selection, TokenTable};
 
-use proxy::BoxError;
+use aegis_gateway::proxy::{self, BoxError};
 
 #[derive(Parser)]
 #[command(about = "HTTP gateway for the Aegis sandbox")]
