@@ -2,14 +2,14 @@
 //!
 //! Defines the GitHub policy data model and the repository pattern matching
 //! used to narrow a GitHub token's scope. A pattern is either an exact
-//! `owner/repo`, an owner wildcard `org/*`, or the catch-all `*`.
+//! `owner/repo`, an owner wildcard `org/*`, or the catch all `*`.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::secrets::Permission;
 
-/// The curated set of GitHub fine-grained permissions the gateway enforces.
+/// The curated set of GitHub fine grained permissions the gateway enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scope {
     Contents,
@@ -49,7 +49,7 @@ pub struct CompiledRepoRule {
     pub permissions: BTreeMap<Scope, Permission>,
 }
 
-/// A per-repository GitHub policy, an ordered list of compiled rules.
+/// A per repository GitHub policy, an ordered list of compiled rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubPolicy {
     rules: Vec<CompiledRepoRule>,
@@ -62,19 +62,31 @@ impl GithubPolicy {
     }
 
     /// Decide whether a request is allowed under this policy.
-    pub fn evaluate(&self, method: &str, path: &str) -> Decision {
-        let Some(request) = classify(method, path) else {
-            return match access_for_method(method) {
-                Access::Read => Decision::Allow,
-                Access::Write => Decision::Deny,
-            };
+    pub fn evaluate(&self, method: &str, path_and_query: &str) -> Decision {
+        let request = match classify(method, path_and_query) {
+            Classification::OutsideRepo => {
+                return match access_for_method(method) {
+                    Access::Read => Decision::Allow,
+                    Access::Write => Decision::Deny,
+                };
+            }
+            Classification::Unrecognized => return Decision::Deny,
+            Classification::Repo(request) => request,
         };
 
         let Some(rule) = self.matching_rule(&request.owner, &request.repo) else {
             return Decision::Deny;
         };
 
-        match rule.permissions.get(&request.scope) {
+        let permission = rule.permissions.get(&request.scope).copied().or_else(|| {
+            if request.scope == Scope::Metadata {
+                Some(Permission::Read)
+            } else {
+                None
+            }
+        });
+
+        match permission {
             Some(Permission::Write) => Decision::Allow,
             Some(Permission::Read) => match request.access {
                 Access::Read => Decision::Allow,
@@ -120,7 +132,7 @@ pub fn repo_matches(pattern: &str, owner: &str, repo: &str) -> bool {
 /// Order two repository patterns by specificity, most specific first.
 ///
 /// An exact `owner/repo` is more specific than an owner wildcard `org/*`,
-/// which is more specific than the catch-all `*`.
+/// which is more specific than the catch all `*`.
 pub fn most_specific(pattern_a: &str, pattern_b: &str) -> Ordering {
     specificity(pattern_a).cmp(&specificity(pattern_b))
 }
@@ -152,6 +164,13 @@ struct ClassifiedRequest {
     access: Access,
 }
 
+/// The result of classifying a request path and query.
+enum Classification {
+    OutsideRepo,
+    Repo(ClassifiedRequest),
+    Unrecognized,
+}
+
 fn access_for_method(method: &str) -> Access {
     match method {
         "GET" | "HEAD" | "OPTIONS" => Access::Read,
@@ -159,9 +178,17 @@ fn access_for_method(method: &str) -> Access {
     }
 }
 
-/// Map an HTTP method and path to a repository scoped request, or `None` when
-/// the path does not address a repository.
-fn classify(method: &str, path: &str) -> Option<ClassifiedRequest> {
+fn query_service(query: &str) -> Option<&str> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("service="))
+}
+
+/// Map an HTTP method and path with optional query string to a classification.
+fn classify(method: &str, path_and_query: &str) -> Classification {
+    let (path, query) = path_and_query
+        .split_once('?')
+        .unwrap_or((path_and_query, ""));
     let segments: Vec<&str> = path
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -170,16 +197,17 @@ fn classify(method: &str, path: &str) -> Option<ClassifiedRequest> {
     if segments.first() == Some(&"repos") && segments.len() >= 3 {
         let owner = segments[1].to_string();
         let repo = segments[2].to_string();
-        let scope = match segments.get(3) {
-            Some(&"pulls") => Scope::PullRequests,
-            Some(&"issues") => Scope::Issues,
-            Some(&"actions") => Scope::Actions,
+        let scope = match segments.get(3).copied() {
+            None => Scope::Metadata,
+            Some("pulls") => Scope::PullRequests,
+            Some("issues") => Scope::Issues,
+            Some("actions") => Scope::Actions,
             Some(
-                &"contents" | &"commits" | &"tags" | &"releases" | &"git" | &"tarball" | &"zipball",
+                "contents" | "commits" | "tags" | "releases" | "git" | "tarball" | "zipball",
             ) => Scope::Contents,
-            _ => Scope::Metadata,
+            Some(_) => return Classification::Unrecognized,
         };
-        return Some(ClassifiedRequest {
+        return Classification::Repo(ClassifiedRequest {
             owner,
             repo,
             scope,
@@ -188,23 +216,31 @@ fn classify(method: &str, path: &str) -> Option<ClassifiedRequest> {
     }
 
     if segments.len() >= 2 {
-        if let Some(repo) = segments[1].strip_suffix(".git") {
-            let access = match segments.get(2) {
-                Some(&"git-receive-pack") => Access::Write,
-                Some(&"git-upload-pack") => Access::Read,
-                Some(&"info") if segments.get(3) == Some(&"refs") => Access::Read,
-                _ => access_for_method(method),
+        let owner = segments[0];
+        let repo = segments[1].strip_suffix(".git").unwrap_or(segments[1]);
+        if !repo.is_empty() {
+            let access = match &segments[2..] {
+                ["git-upload-pack"] => Some(Access::Read),
+                ["git-receive-pack"] => Some(Access::Write),
+                ["info", "refs"] => match query_service(query) {
+                    Some("git-upload-pack") => Some(Access::Read),
+                    Some("git-receive-pack") => Some(Access::Write),
+                    _ => return Classification::Unrecognized,
+                },
+                _ => None,
             };
-            return Some(ClassifiedRequest {
-                owner: segments[0].to_string(),
-                repo: repo.to_string(),
-                scope: Scope::Contents,
-                access,
-            });
+            if let Some(access) = access {
+                return Classification::Repo(ClassifiedRequest {
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                    scope: Scope::Contents,
+                    access,
+                });
+            }
         }
     }
 
-    None
+    Classification::OutsideRepo
 }
 
 #[cfg(test)]
@@ -297,10 +333,46 @@ mod tests {
 
     #[test]
     fn git_receive_pack_write_is_denied_under_contents_read() {
+        let read_policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(
+            read_policy.evaluate("POST", "/org/repo.git/git-receive-pack"),
+            Decision::Deny
+        );
+        let write_policy = policy_with("org/repo", &[(Scope::Contents, Permission::Write)]);
+        assert_eq!(
+            write_policy.evaluate("POST", "/org/repo.git/git-receive-pack"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn git_upload_pack_without_dot_git_is_allowed_under_contents_read() {
         let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
         assert_eq!(
-            policy.evaluate("POST", "/org/repo.git/git-receive-pack"),
+            policy.evaluate("POST", "/org/repo/git-upload-pack"),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate("GET", "/org/repo/info/refs?service=git-upload-pack"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn git_info_refs_receive_pack_is_write_and_denied_under_read_only() {
+        let read_policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(
+            read_policy.evaluate("GET", "/org/repo.git/info/refs?service=git-receive-pack"),
             Decision::Deny
+        );
+        assert_eq!(
+            read_policy.evaluate("GET", "/org/repo/info/refs?service=git-receive-pack"),
+            Decision::Deny
+        );
+        let write_policy = policy_with("org/repo", &[(Scope::Contents, Permission::Write)]);
+        assert_eq!(
+            write_policy.evaluate("GET", "/org/repo.git/info/refs?service=git-receive-pack"),
+            Decision::Allow
         );
     }
 
@@ -317,8 +389,9 @@ mod tests {
     }
 
     #[test]
-    fn unmodeled_metadata_read_is_denied_without_metadata_permission() {
+    fn metadata_read_is_implied_and_unmodeled_subpath_is_denied() {
         let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(policy.evaluate("GET", "/repos/org/repo"), Decision::Allow);
         assert_eq!(
             policy.evaluate("GET", "/repos/org/repo/collaborators"),
             Decision::Deny

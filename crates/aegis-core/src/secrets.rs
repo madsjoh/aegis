@@ -10,19 +10,39 @@ use std::process::{Command, ExitStatus};
 use serde::Deserialize;
 
 /// A decrypted secrets file, keyed by integration name and then credential name.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct SecretsFile {
     #[serde(flatten)]
     pub integrations: BTreeMap<String, BTreeMap<String, Credential>>,
 }
 
+impl std::fmt::Debug for SecretsFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretsFile")
+            .field("integrations", &self.integrations)
+            .finish()
+    }
+}
+
 /// A single named credential for one integration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct Credential {
     pub pat: Option<String>,
     pub api_key: Option<String>,
     #[serde(default)]
     pub repositories: Vec<RepoRule>,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Credential")
+            .field("pat", &self.pat.as_ref().map(|_| "[REDACTED]"))
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("repositories", &self.repositories)
+            .finish()
+    }
 }
 
 /// A repository pattern and the permissions it grants.
@@ -164,5 +184,29 @@ mod tests {
         let write: Permission = serde_json::from_str("\"write\"").expect("write parses");
         assert_eq!(read, Permission::Read);
         assert_eq!(write, Permission::Write);
+    }
+
+    #[test]
+    fn debug_redacts_credential_secrets() {
+        let credential = Credential {
+            pat: Some("super_secret_pat".to_string()),
+            api_key: Some("super_secret_api_key".to_string()),
+            repositories: vec![],
+        };
+        let secrets = SecretsFile {
+            integrations: BTreeMap::from([(
+                "github".to_string(),
+                BTreeMap::from([("personal".to_string(), credential.clone())]),
+            )]),
+        };
+        let credential_debug = format!("{credential:?}");
+        assert!(credential_debug.contains("[REDACTED]"));
+        assert!(!credential_debug.contains("super_secret_pat"));
+        assert!(!credential_debug.contains("super_secret_api_key"));
+
+        let secrets_debug = format!("{secrets:?}");
+        assert!(secrets_debug.contains("[REDACTED]"));
+        assert!(!secrets_debug.contains("super_secret_pat"));
+        assert!(!secrets_debug.contains("super_secret_api_key"));
     }
 }

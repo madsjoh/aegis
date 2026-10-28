@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 
 use crate::catalog::catalog;
 use crate::policy::{CompiledRepoRule, GithubPolicy, Scope};
-use crate::secrets::{RepoRule, SecretsFile};
+use crate::secrets::{Permission, RepoRule, SecretsFile};
 
 /// One proxy rule: the hosts it matches and how to rewrite matching requests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Rule {
     pub hosts: Vec<String>,
     pub auth_header: String,
@@ -19,10 +19,32 @@ pub struct Rule {
     pub policy: Option<GithubPolicy>,
 }
 
+impl std::fmt::Debug for Rule {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Rule")
+            .field("hosts", &self.hosts)
+            .field("auth_header", &self.auth_header)
+            .field("placeholder", &self.placeholder)
+            .field("secret", &"[REDACTED]")
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
 /// The token table: the ordered set of proxy rules built from the catalog.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TokenTable {
     rules: Vec<Rule>,
+}
+
+impl std::fmt::Debug for TokenTable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenTable")
+            .field("rules", &self.rules)
+            .finish()
+    }
 }
 
 /// An error that can occur while building a token table.
@@ -139,18 +161,22 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     }
 }
 
-/// Compile repository rules into a policy rule, dropping unknown scope names.
+/// Compile repository rules into a policy rule, dropping unknown scope names
+/// and implying `metadata: read` unless `metadata: write` is already present.
 fn compile_repositories(repositories: &[RepoRule]) -> Vec<CompiledRepoRule> {
     repositories
         .iter()
         .map(|repository| {
-            let permissions = repository
+            let mut permissions: BTreeMap<Scope, Permission> = repository
                 .permissions
                 .iter()
                 .filter_map(|(name, permission)| {
                     Scope::from_name(name).map(|scope| (scope, *permission))
                 })
                 .collect();
+            permissions
+                .entry(Scope::Metadata)
+                .or_insert(Permission::Read);
 
             CompiledRepoRule {
                 pattern: repository.pattern.clone(),
@@ -318,6 +344,42 @@ mod tests {
         assert_eq!(compiled[0].pattern, "owner/repo");
         assert_eq!(compiled[0].permissions[&Scope::Contents], Permission::Write);
         assert_eq!(compiled[0].permissions[&Scope::Issues], Permission::Read);
+        assert_eq!(compiled[0].permissions[&Scope::Metadata], Permission::Read);
         assert!(!compiled[0].permissions.contains_key(&Scope::PullRequests));
+    }
+
+    #[test]
+    fn compile_repositories_implies_metadata_read_and_denies_collaborators() {
+        use crate::policy::Decision;
+
+        let repositories = vec![RepoRule {
+            pattern: "org/repo".to_string(),
+            permissions: BTreeMap::from([("contents".to_string(), Permission::Read)]),
+        }];
+        let policy = GithubPolicy::new(compile_repositories(&repositories));
+        assert_eq!(policy.evaluate("GET", "/repos/org/repo"), Decision::Allow);
+        assert_eq!(
+            policy.evaluate("GET", "/repos/org/repo/collaborators"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn debug_redacts_rule_and_table_secrets() {
+        let rule = Rule {
+            hosts: vec!["api.github.com".to_string()],
+            auth_header: "authorization".to_string(),
+            placeholder: "github_pat_aegis_placeholder".to_string(),
+            secret: "super_secret_token".to_string(),
+            policy: None,
+        };
+        let table = TokenTable::new(vec![rule.clone()]);
+        let rule_debug = format!("{rule:?}");
+        assert!(rule_debug.contains("[REDACTED]"));
+        assert!(!rule_debug.contains("super_secret_token"));
+
+        let table_debug = format!("{table:?}");
+        assert!(table_debug.contains("[REDACTED]"));
+        assert!(!table_debug.contains("super_secret_token"));
     }
 }
