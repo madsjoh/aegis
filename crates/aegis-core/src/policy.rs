@@ -33,6 +33,13 @@ impl Scope {
     }
 }
 
+/// The outcome of enforcing a policy for a single request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Deny,
+}
+
 /// A compiled repository rule: a pattern plus the permissions it grants.
 ///
 /// A scope missing from the permissions map is treated as `none`.
@@ -52,6 +59,46 @@ impl GithubPolicy {
     /// Build a policy from already compiled rules.
     pub fn new(rules: Vec<CompiledRepoRule>) -> GithubPolicy {
         GithubPolicy { rules }
+    }
+
+    /// Decide whether a request is allowed under this policy.
+    pub fn evaluate(&self, method: &str, path: &str) -> Decision {
+        let Some(request) = classify(method, path) else {
+            return match access_for_method(method) {
+                Access::Read => Decision::Allow,
+                Access::Write => Decision::Deny,
+            };
+        };
+
+        let Some(rule) = self.matching_rule(&request.owner, &request.repo) else {
+            return Decision::Deny;
+        };
+
+        match rule.permissions.get(&request.scope) {
+            Some(Permission::Write) => Decision::Allow,
+            Some(Permission::Read) => match request.access {
+                Access::Read => Decision::Allow,
+                Access::Write => Decision::Deny,
+            },
+            None => Decision::Deny,
+        }
+    }
+
+    fn matching_rule(&self, owner: &str, repo: &str) -> Option<&CompiledRepoRule> {
+        let mut best: Option<&CompiledRepoRule> = None;
+        for rule in &self.rules {
+            if !repo_matches(&rule.pattern, owner, repo) {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some(current) => most_specific(&rule.pattern, &current.pattern) == Ordering::Less,
+            };
+            if replace {
+                best = Some(rule);
+            }
+        }
+        best
     }
 }
 
@@ -87,6 +134,77 @@ fn specificity(pattern: &str) -> u8 {
             None => 3,
         },
     }
+}
+
+/// Whether a request reads or writes, derived from the HTTP method or the git
+/// smart HTTP service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+}
+
+/// A parsed repository scoped request.
+struct ClassifiedRequest {
+    owner: String,
+    repo: String,
+    scope: Scope,
+    access: Access,
+}
+
+fn access_for_method(method: &str) -> Access {
+    match method {
+        "GET" | "HEAD" | "OPTIONS" => Access::Read,
+        _ => Access::Write,
+    }
+}
+
+/// Map an HTTP method and path to a repository scoped request, or `None` when
+/// the path does not address a repository.
+fn classify(method: &str, path: &str) -> Option<ClassifiedRequest> {
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    if segments.first() == Some(&"repos") && segments.len() >= 3 {
+        let owner = segments[1].to_string();
+        let repo = segments[2].to_string();
+        let scope = match segments.get(3) {
+            Some(&"pulls") => Scope::PullRequests,
+            Some(&"issues") => Scope::Issues,
+            Some(&"actions") => Scope::Actions,
+            Some(
+                &"contents" | &"commits" | &"tags" | &"releases" | &"git" | &"tarball" | &"zipball",
+            ) => Scope::Contents,
+            _ => Scope::Metadata,
+        };
+        return Some(ClassifiedRequest {
+            owner,
+            repo,
+            scope,
+            access: access_for_method(method),
+        });
+    }
+
+    if segments.len() >= 2 {
+        if let Some(repo) = segments[1].strip_suffix(".git") {
+            let access = match segments.get(2) {
+                Some(&"git-receive-pack") => Access::Write,
+                Some(&"git-upload-pack") => Access::Read,
+                Some(&"info") if segments.get(3) == Some(&"refs") => Access::Read,
+                _ => access_for_method(method),
+            };
+            return Some(ClassifiedRequest {
+                owner: segments[0].to_string(),
+                repo: repo.to_string(),
+                scope: Scope::Contents,
+                access,
+            });
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -131,5 +249,101 @@ mod tests {
         assert_eq!(Scope::from_name("actions"), Some(Scope::Actions));
         assert_eq!(Scope::from_name("metadata"), Some(Scope::Metadata));
         assert_eq!(Scope::from_name("packages"), None);
+    }
+
+    fn policy_with(pattern: &str, permissions: &[(Scope, Permission)]) -> GithubPolicy {
+        let mut map = BTreeMap::new();
+        for (scope, permission) in permissions {
+            map.insert(*scope, *permission);
+        }
+        GithubPolicy::new(vec![CompiledRepoRule {
+            pattern: pattern.to_string(),
+            permissions: map,
+        }])
+    }
+
+    fn policy_with_rules(rules: &[(&str, &[(Scope, Permission)])]) -> GithubPolicy {
+        GithubPolicy::new(
+            rules
+                .iter()
+                .map(|(pattern, permissions)| CompiledRepoRule {
+                    pattern: (*pattern).to_string(),
+                    permissions: permissions
+                        .iter()
+                        .map(|(scope, permission)| (*scope, *permission))
+                        .collect(),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn contents_read_is_allowed_under_contents_read() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(
+            policy.evaluate("GET", "/repos/org/repo/contents/x"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn issues_write_is_denied_under_issues_read() {
+        let policy = policy_with("org/repo", &[(Scope::Issues, Permission::Read)]);
+        assert_eq!(
+            policy.evaluate("POST", "/repos/org/repo/issues"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn git_receive_pack_write_is_denied_under_contents_read() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(
+            policy.evaluate("POST", "/org/repo.git/git-receive-pack"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn outside_repo_read_is_allowed() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(policy.evaluate("GET", "/user"), Decision::Allow);
+    }
+
+    #[test]
+    fn outside_repo_write_is_denied() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(policy.evaluate("POST", "/orgs/o/repos"), Decision::Deny);
+    }
+
+    #[test]
+    fn unmodeled_metadata_read_is_denied_without_metadata_permission() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(
+            policy.evaluate("GET", "/repos/org/repo/collaborators"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn metadata_read_is_allowed_under_metadata_read() {
+        let policy = policy_with("org/repo", &[(Scope::Metadata, Permission::Read)]);
+        assert_eq!(policy.evaluate("GET", "/repos/org/repo"), Decision::Allow);
+    }
+
+    #[test]
+    fn most_specific_rule_wins_in_evaluate() {
+        let policy = policy_with_rules(&[
+            ("org/*", &[(Scope::Contents, Permission::Read)]),
+            ("org/repo", &[(Scope::Contents, Permission::Write)]),
+        ]);
+        assert_eq!(
+            policy.evaluate("POST", "/repos/org/repo/contents/x"),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate("POST", "/repos/org/other/contents/x"),
+            Decision::Deny
+        );
     }
 }
