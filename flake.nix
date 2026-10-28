@@ -47,15 +47,22 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           craneLib = crane.mkLib pkgs;
+          cargoSrc = pkgs.lib.cleanSourceWith {
+            src = craneLib.path ./.;
+            filter = path: type:
+              (pkgs.lib.hasInfix "/tests/fixtures/" path)
+              || (craneLib.filterCargoSources path type);
+          };
         in {
           "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.system.build.vm;
           aegis-gateway = craneLib.buildPackage {
-            src = craneLib.cleanCargoSource (craneLib.path ./.);
+            src = cargoSrc;
             pname = "aegis-gateway";
             version = "0.1.0";
             cargoExtraArgs = "--package aegis-gateway";
             strictDeps = true;
-            doCheck = false;
+            doCheck = true;
+            nativeCheckInputs = [ pkgs.sops ];
           };
           default = aegis.mkRunner { inherit pkgs system flakeRef; };
         });
@@ -63,7 +70,29 @@
       checks = aegis.forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          craneLib = crane.mkLib pkgs;
+          cargoSrc = pkgs.lib.cleanSourceWith {
+            src = craneLib.path ./.;
+            filter = path: type:
+              (pkgs.lib.hasInfix "/tests/fixtures/" path)
+              || (craneLib.filterCargoSources path type);
+          };
+          cargoArtifacts = craneLib.buildDepsOnly {
+            src = cargoSrc;
+            pname = "aegis-workspace";
+            version = "0.1.0";
+            strictDeps = true;
+          };
         in {
+          cargo-test = craneLib.cargoTest {
+            inherit cargoArtifacts;
+            src = cargoSrc;
+            pname = "aegis-workspace";
+            version = "0.1.0";
+            strictDeps = true;
+            nativeCheckInputs = [ pkgs.sops ];
+          };
+
           lock = pkgs.runCommand "aegis-lock-test" {
             buildInputs = [ pkgs.util-linux ];
           } ''
@@ -113,6 +142,7 @@
             buildInputs = [ pkgs.gnugrep ];
           } ''
             grep --fixed-strings --quiet 'ensure-ca' ${self.packages.${system}.default}/bin/aegis
+            grep --fixed-strings --quiet -- '-o ExitOnForwardFailure=yes' ${self.packages.${system}.default}/bin/aegis
             grep --fixed-strings --quiet -- '-R "3128:127.0.0.1:$VM_PROXY_HOST_PORT"' ${self.packages.${system}.default}/bin/aegis
             touch "$out"
           '';
@@ -147,9 +177,10 @@
             test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.fileSystems."/run/aegis/gitconfig".options)}" = "1"
             test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-x86_64-linux.config.virtualisation.fileSystems."/aegis".options)}" = "1"
             test "${builtins.toJSON self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.programs.git.settings}" = "{}"
-            test "${self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.home.sessionVariables.HTTPS_PROXY}" = "http://127.0.0.1:3128"
+            test "${builtins.toString (self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.home.sessionVariables ? HTTPS_PROXY)}" = ""
             test "${self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.home.sessionVariables.SSL_CERT_FILE}" = "/run/aegis/ca-bundle.crt"
-            test "${self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.home.sessionVariables.NODE_EXTRA_CA_CERTS}" = "/aegis/ca.crt"
+            test "${self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.home.sessionVariables.REQUESTS_CA_BUNDLE}" = "/run/aegis/ca-bundle.crt"
+            test "${self.nixosConfigurations.aegis-vm-x86_64-linux.config.home-manager.users.agent.home.sessionVariables.NODE_EXTRA_CA_CERTS}" = "/run/aegis/ca-bundle.crt"
             test "${builtins.toString (builtins.length self.nixosConfigurations.aegis-vm-x86_64-linux.config.users.users.agent.extraGroups)}" = "0"
             test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-aarch64-darwin.config.fileSystems."/aegis".options)}" = "1"
             test "${builtins.toString (nixpkgs.lib.elem "ro" self.nixosConfigurations.aegis-vm-aarch64-darwin.config.fileSystems."/run/aegis/gitconfig".options)}" = "1"

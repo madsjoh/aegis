@@ -15,6 +15,7 @@ pkgs.writeShellApplication {
     jq
     nix
     openssh
+    sops
     util-linux
   ] ++ lib.optionals (!isDarwin) [ virtiofsd ];
   text = ''
@@ -79,7 +80,7 @@ pkgs.writeShellApplication {
     VM_SKILL_MATTPOCOCK="$(jq -r '.mattpocock // false' "$USER_CONFIG_DIR/skills.json")"
     VM_SKILL_VERCEL="$(jq -r '.vercel // false' "$USER_CONFIG_DIR/skills.json")"
 
-    # 4. Workspace-derived identifiers, the host wide SSH key, and the SSH
+    # 4. Workspace derived identifiers, the host wide SSH key, and the SSH
     # transport details. Linux reaches the guest over vsock; macOS reaches it
     # over TCP through a forwarded host port.
     VM_MOUNT_TAG="ws_$(printf '%s' "$WORKSPACE_ID" | cut -c1-8)"
@@ -95,7 +96,7 @@ pkgs.writeShellApplication {
     # secrets. The guest proxy port is fixed and matches the guest default; the
     # host port is derived from the workspace CID like the SSH port. Without a
     # secrets.yaml, nothing is exported and the runner behaves exactly as before.
-    VM_PROXY_PORT=3128
+    VM_PROXY_PORT=""
     VM_PROXY_HOST_PORT=$(( 21000 + VM_CID ))
     if [ -f "$USER_CONFIG_DIR/secrets.yaml" ]; then
       echo "Provisioning the gateway CA..."
@@ -103,10 +104,11 @@ pkgs.writeShellApplication {
       AGE_KEY_FILE="''${XDG_CONFIG_HOME:-$HOME/.config}/sops/age/keys.txt"
       "$GATEWAY_PATH/bin/aegis-gateway" ensure-ca --ca-dir "$DATA_DIR/ca" --cert-out "$USER_CONFIG_DIR/ca.crt"
       GATEWAY_ENABLED=1
+      VM_PROXY_PORT=3128
     fi
 
     # 5. Stage the host git configuration into the run directory so the guest
-    # can mount it read-only. An empty [user] section keeps git functional when
+    # can mount it read only. An empty [user] section keeps git functional when
     # the host has no global identity.
     mkdir -p "$RUN_DIR/gitconfig"
     if [ -f "$HOME/.gitconfig" ]; then
@@ -119,7 +121,12 @@ pkgs.writeShellApplication {
     export HOST_WORKSPACE="$HOST_PWD"
     export HOST_CONFIG="$USER_CONFIG_DIR"
     export HOST_STATE_DIR="$STATE_DIR"
-    export VM_MOUNT_TAG VM_CID VM_SSH_PORT VM_PROXY_PORT
+    export VM_MOUNT_TAG VM_CID VM_SSH_PORT
+    if [ -n "$VM_PROXY_PORT" ]; then
+      export VM_PROXY_PORT
+    else
+      unset VM_PROXY_PORT
+    fi
     VM_HOST_UID="$(id -u)"
     VM_HOST_GID="$(id -g)"
     export VM_HOST_UID VM_HOST_GID
@@ -145,7 +152,7 @@ pkgs.writeShellApplication {
       ')"
     fi
 
-    # 8. Start the virtiofs daemons. macOS uses Apple's built-in shares, which
+    # 8. Start the virtiofs daemons. macOS uses Apple's built in shares, which
     # need no virtiofsd.
     if [ "$IS_DARWIN" != "true" ]; then
       echo "Starting the virtiofs daemons..."
@@ -210,6 +217,7 @@ pkgs.writeShellApplication {
     # Start the gateway proxy in the background when secrets are present.
     if [ -n "$GATEWAY_ENABLED" ]; then
       echo "Starting the gateway proxy..."
+      : > "$RUN_DIR/gateway.log"
       (
         close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
         "$GATEWAY_PATH/bin/aegis-gateway" serve \
@@ -219,6 +227,24 @@ pkgs.writeShellApplication {
           --age-key "$AGE_KEY_FILE"
       ) &> "$RUN_DIR/gateway.log" &
       GATEWAY_PID=$!
+      gateway_ready=false
+      for _ in $(seq 1 50); do
+        if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+          echo "Error: The gateway proxy exited before becoming ready." >&2
+          cat "$RUN_DIR/gateway.log" >&2
+          exit 1
+        fi
+        if grep --fixed-strings --quiet "listening on" "$RUN_DIR/gateway.log"; then
+          gateway_ready=true
+          break
+        fi
+        sleep 0.1
+      done
+      if [ "$gateway_ready" != true ]; then
+        echo "Error: Timed out waiting for the gateway proxy to listen." >&2
+        cat "$RUN_DIR/gateway.log" >&2
+        exit 1
+      fi
     fi
 
     # 9. Run the VM in the background.
@@ -265,11 +291,30 @@ pkgs.writeShellApplication {
 
     # Hold a reverse tunnel so the guest reaches the gateway on port 3128.
     if [ -n "$GATEWAY_ENABLED" ]; then
+      : > "$RUN_DIR/reverse-tunnel.log"
       (
         close_lock_descriptors "$WORKSPACE_LOCK_DESCRIPTOR"
-        ssh -N -R "3128:127.0.0.1:$VM_PROXY_HOST_PORT" "''${SSH_OPTS[@]}" "''${SSH_TARGET[@]}"
+        ssh -v -N -o ExitOnForwardFailure=yes -R "3128:127.0.0.1:$VM_PROXY_HOST_PORT" "''${SSH_OPTS[@]}" "''${SSH_TARGET[@]}"
       ) &> "$RUN_DIR/reverse-tunnel.log" &
       TUNNEL_PID=$!
+      tunnel_ready=false
+      for _ in $(seq 1 50); do
+        if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+          echo "Error: The reverse SSH tunnel exited before becoming ready." >&2
+          cat "$RUN_DIR/reverse-tunnel.log" >&2
+          exit 1
+        fi
+        if grep --fixed-strings --quiet "remote forward success" "$RUN_DIR/reverse-tunnel.log"; then
+          tunnel_ready=true
+          break
+        fi
+        sleep 0.1
+      done
+      if [ "$tunnel_ready" != true ]; then
+        echo "Error: Timed out waiting for the reverse SSH tunnel." >&2
+        cat "$RUN_DIR/reverse-tunnel.log" >&2
+        exit 1
+      fi
     fi
 
     # 11. Attach OpenCode over SSH.
