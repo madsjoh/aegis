@@ -2,7 +2,7 @@
 //!
 //! Serves a forward proxy that terminates TLS for hosts with a matching rule,
 //! rewrites the placeholder credential, enforces GitHub policy, and
-//! re-encrypts upstream. Unmatched hosts are tunneled opaquely.
+//! encrypts upstream again. Unmatched hosts are tunneled opaquely.
 
 use std::error::Error;
 use std::net::SocketAddr;
@@ -38,7 +38,7 @@ use crate::rewrite::rewrite_header;
 /// The boxed error type the gateway uses across its public boundary.
 ///
 /// This is a nominal wrapper rather than a type alias because `Box<dyn Error>`
-/// type aliases trip rustc's higher-ranked lifetime limitation when a future
+/// type aliases trip rustc's higher ranked lifetime limitation when a future
 /// that returns them is required to be `Send`, as it is here by `tokio::spawn`.
 pub struct BoxError(Box<dyn Error + Send + Sync>);
 
@@ -98,38 +98,71 @@ impl From<Box<dyn Error + Send + Sync>> for BoxError {
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
-/// Serve the forward proxy on `addr` until the process exits.
+/// Serve the forward proxy on `addr` until the process exits, trusting only
+/// the platform root store for upstream connections.
 pub async fn serve(
     addr: SocketAddr,
     table: Arc<TokenTable>,
     authority: Arc<Authority>,
 ) -> Result<(), BoxError> {
+    serve_with_extra_ca(addr, table, authority, None).await
+}
+
+/// Serve the forward proxy on `addr` until the process exits, optionally
+/// trusting an extra certificate authority for upstream connections in tests.
+pub async fn serve_with_extra_ca(
+    addr: SocketAddr,
+    table: Arc<TokenTable>,
+    authority: Arc<Authority>,
+    extra_ca: Option<Arc<Authority>>,
+) -> Result<(), BoxError> {
+    let roots = Arc::new(upstream_root_store(extra_ca.as_deref()));
+    let clients = upstream_clients(roots);
+    let acceptor = TlsAcceptor::from(mitm_server_config(Arc::clone(&authority)));
+
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
 
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                tracing::warn!("accept failed: {err}");
+                if is_resource_exhaustion(&err) {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                continue;
+            }
+        };
         let table = Arc::clone(&table);
-        let authority = Arc::clone(&authority);
+        let acceptor = acceptor.clone();
+        let clients = clients.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, table, authority).await {
+            if let Err(err) = handle_connection(stream, table, acceptor, clients).await {
                 tracing::debug!("connection from {peer} failed: {err}");
             }
         });
     }
 }
 
+fn is_resource_exhaustion(err: &std::io::Error) -> bool {
+    matches!(err.kind(), std::io::ErrorKind::OutOfMemory)
+        || matches!(err.raw_os_error(), Some(12 | 23 | 24 | 105))
+}
+
 /// Handle one client connection: the proxy control channel over plain HTTP.
 async fn handle_connection(
     stream: TcpStream,
     table: Arc<TokenTable>,
-    authority: Arc<Authority>,
+    acceptor: TlsAcceptor,
+    clients: UpstreamClients,
 ) -> Result<(), BoxError> {
     let service = service_fn(move |req| {
         let table = Arc::clone(&table);
-        let authority = Arc::clone(&authority);
-        async move { proxy_request(req, table, authority).await }
+        let acceptor = acceptor.clone();
+        let clients = clients.clone();
+        async move { proxy_request(req, table, acceptor, clients).await }
     });
 
     http1::Builder::new()
@@ -140,14 +173,15 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Route one proxy request: CONNECT or an absolute-form HTTP request.
+/// Route one proxy request: CONNECT or an absolute form HTTP request.
 async fn proxy_request(
     req: Request<Incoming>,
     table: Arc<TokenTable>,
-    authority: Arc<Authority>,
+    acceptor: TlsAcceptor,
+    clients: UpstreamClients,
 ) -> Result<Response<BoxBody>, BoxError> {
     if req.method() == Method::CONNECT {
-        handle_connect(req, table, authority).await
+        handle_connect(req, table, acceptor, clients).await
     } else {
         handle_absolute_form(req).await
     }
@@ -157,7 +191,8 @@ async fn proxy_request(
 async fn handle_connect(
     mut req: Request<Incoming>,
     table: Arc<TokenTable>,
-    authority: Arc<Authority>,
+    acceptor: TlsAcceptor,
+    clients: UpstreamClients,
 ) -> Result<Response<BoxBody>, BoxError> {
     let Some(target) = req
         .uri()
@@ -175,11 +210,10 @@ async fn handle_connect(
     if let Some(rule) = table.matching_rule(&lowercase_host) {
         let rule = rule.clone();
         let on_upgrade = hyper::upgrade::on(&mut req);
-        let authority = Arc::clone(&authority);
         tokio::spawn(async move {
             match on_upgrade.await {
                 Ok(upgraded) => {
-                    if let Err(err) = mitm(upgraded, target, rule, authority).await {
+                    if let Err(err) = mitm(upgraded, target, rule, acceptor, clients).await {
                         tracing::debug!("mitm connection failed: {err}");
                     }
                 }
@@ -220,12 +254,10 @@ async fn mitm(
     upgraded: hyper::upgrade::Upgraded,
     target: String,
     rule: Rule,
-    authority: Arc<Authority>,
+    acceptor: TlsAcceptor,
+    clients: UpstreamClients,
 ) -> Result<(), BoxError> {
-    let acceptor = TlsAcceptor::from(mitm_server_config(Arc::clone(&authority)));
     let tls = acceptor.accept(TokioIo::new(upgraded)).await?;
-
-    let clients = upstream_clients(&authority);
 
     let service = service_fn(move |req| {
         let rule = rule.clone();
@@ -253,8 +285,13 @@ async fn handle_inner_request(
     };
 
     if let Some(policy) = &rule.policy {
-        if policy.evaluate(req.method().as_str(), req.uri().path()) == Decision::Deny {
-            tracing::warn!("policy denied {} {}", req.method(), req.uri().path());
+        let path_and_query = req
+            .uri()
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or_else(|| req.uri().path());
+        if policy.evaluate(req.method().as_str(), path_and_query) == Decision::Deny {
+            tracing::warn!("policy denied {} {}", req.method(), path_and_query);
             return Ok(forbidden());
         }
     }
@@ -280,7 +317,7 @@ fn set_header(req: &mut Request<Incoming>, name: &str, value: String) -> Result<
 }
 
 /// Forward a decrypted request upstream over TLS, selecting the upstream
-/// protocol from the request version so it matches the MITM-leg protocol.
+/// protocol from the request version so it matches the MITM leg protocol.
 async fn forward_over_tls(
     req: Request<Incoming>,
     target: String,
@@ -299,7 +336,7 @@ async fn forward_over_tls(
     Ok(response.map(|body| body.map_err(into_box).boxed()))
 }
 
-/// Convert an origin-form URI into absolute form for `https://{authority}`.
+/// Convert an origin form URI into absolute form for `https://{authority}`.
 fn absolute_uri(authority: &str, uri: &Uri) -> Result<Uri, BoxError> {
     let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     http::Uri::builder()
@@ -321,17 +358,17 @@ struct UpstreamClients {
     http2: UpstreamClient,
 }
 
-/// Build the HTTP/1.1 and HTTP/2 upstream clients.
-fn upstream_clients(authority: &Authority) -> UpstreamClients {
+/// Build the HTTP/1.1 and HTTP/2 upstream clients sharing a root store.
+fn upstream_clients(roots: Arc<rustls::RootCertStore>) -> UpstreamClients {
     UpstreamClients {
-        http1: upstream_client(authority, &[b"http/1.1"]),
-        http2: upstream_client(authority, &[b"h2"]),
+        http1: upstream_client(Arc::clone(&roots), &[b"http/1.1"]),
+        http2: upstream_client(roots, &[b"h2"]),
     }
 }
 
 /// Build one upstream client offering the given ALPN protocols.
-fn upstream_client(authority: &Authority, alpn: &[&[u8]]) -> UpstreamClient {
-    let connector = UpstreamConnector::new(upstream_tls_connector(authority, alpn));
+fn upstream_client(roots: Arc<rustls::RootCertStore>, alpn: &[&[u8]]) -> UpstreamClient {
+    let connector = UpstreamConnector::new(upstream_tls_connector(roots, alpn));
     hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector)
 }
 
@@ -437,7 +474,7 @@ impl hyper::rt::Write for UpstreamIo {
     }
 }
 
-/// Handle an absolute-form request by forwarding it over plain HTTP.
+/// Handle an absolute form request by forwarding it over plain HTTP.
 async fn handle_absolute_form(mut req: Request<Incoming>) -> Result<Response<BoxBody>, BoxError> {
     let Some(authority) = req.uri().authority() else {
         return Ok(bad_request());
@@ -471,7 +508,7 @@ fn into_box(err: hyper::Error) -> BoxError {
     BoxError::from(err)
 }
 
-/// Convert an absolute-form URI into origin-form.
+/// Convert an absolute form URI into origin form.
 fn origin_form(uri: &Uri) -> Uri {
     uri.path_and_query()
         .map(|path_and_query| path_and_query.as_str())
@@ -532,37 +569,33 @@ impl ResolvesServerCert for CertificateResolver {
     }
 }
 
-/// Build the root store for upstream connections: the gateway CA plus the
-/// platform trust store.
-fn upstream_root_store(authority: &Authority) -> rustls::RootCertStore {
+/// Build the root store for upstream connections from the platform trust store
+/// and an optional extra certificate authority used in tests.
+fn upstream_root_store(extra_ca: Option<&Authority>) -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
 
-    // The gateway CA so gateway-signed local upstreams verify.
-    let mut pem = std::io::Cursor::new(authority.ca_pem());
-    for certificate in rustls_pemfile::certs(&mut pem).flatten() {
-        let _ = roots.add(certificate);
+    if let Some(authority) = extra_ca {
+        let mut pem = std::io::Cursor::new(authority.ca_pem());
+        for certificate in rustls_pemfile::certs(&mut pem).flatten() {
+            let _ = roots.add(certificate);
+        }
     }
 
-    // Platform roots so real upstreams verify. Loading is best-effort: an empty
-    // or unreadable store simply means only gateway-signed upstreams verify.
+    // Platform roots so real upstreams verify.
     let native = rustls_native_certs::load_native_certs();
     let _ = roots.add_parsable_certificates(native.certs);
 
     roots
 }
 
-/// The TLS connector the gateway uses when re-encrypting upstream, offering the
-/// given ALPN protocols.
-///
-/// The gateway CA is trusted so that a local upstream minted by the same
-/// authority verifies in tests, and the platform trust store is trusted so
-/// real upstreams verify too.
-fn upstream_tls_connector(authority: &Authority, alpn: &[&[u8]]) -> Arc<TlsConnector> {
+/// The TLS connector the gateway uses when encrypting upstream again, offering
+/// the given ALPN protocols.
+fn upstream_tls_connector(roots: Arc<rustls::RootCertStore>, alpn: &[&[u8]]) -> Arc<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .expect("supported protocol versions")
-        .with_root_certificates(upstream_root_store(authority))
+        .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
 
@@ -906,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_root_store_seeds_gateway_ca_and_platform_roots() {
+    fn production_upstream_root_store_excludes_gateway_ca() {
         let dir = temp_dir("roots");
         let authority = Authority::load_or_create(&dir).expect("authority");
 
@@ -914,23 +947,14 @@ mod tests {
             .flatten()
             .count();
 
-        let native = rustls_native_certs::load_native_certs();
+        let production_store = upstream_root_store(None);
+        let test_store = upstream_root_store(Some(&authority));
 
-        let store = upstream_root_store(&authority);
-
-        // The gateway CA is always present, so gateway-signed upstreams verify.
-        assert!(
-            store.roots.len() >= gateway_certs,
-            "gateway CA missing from the upstream root store"
+        assert_eq!(
+            test_store.roots.len(),
+            production_store.roots.len() + gateway_certs,
+            "production upstream root store must not trust the gateway CA"
         );
-
-        // Platform roots, when the host has any, are loaded too.
-        if !native.certs.is_empty() {
-            assert!(
-                store.roots.len() > gateway_certs,
-                "platform roots missing from the upstream root store"
-            );
-        }
     }
 
     #[tokio::test]
@@ -943,7 +967,12 @@ mod tests {
         let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
 
         let proxy_addr = ephemeral_addr().await;
-        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+        tokio::spawn(serve_with_extra_ca(
+            proxy_addr,
+            table,
+            Arc::clone(&authority),
+            Some(Arc::clone(&authority)),
+        ));
 
         let target = format!("localhost:{}", upstream_addr.port());
         let request = format!(
@@ -974,7 +1003,12 @@ mod tests {
         let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
 
         let proxy_addr = ephemeral_addr().await;
-        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+        tokio::spawn(serve_with_extra_ca(
+            proxy_addr,
+            table,
+            Arc::clone(&authority),
+            Some(Arc::clone(&authority)),
+        ));
 
         // A POST is denied by the empty policy, so a 200 here proves the policy
         // is skipped when the request carries no placeholder.
@@ -998,7 +1032,12 @@ mod tests {
         let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
 
         let proxy_addr = ephemeral_addr().await;
-        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+        tokio::spawn(serve_with_extra_ca(
+            proxy_addr,
+            table,
+            Arc::clone(&authority),
+            Some(Arc::clone(&authority)),
+        ));
 
         // `127.0.0.1` has no rule, so the proxy tunnels. The placeholder must
         // reach the upstream untouched, proving no interception happened.
@@ -1032,7 +1071,12 @@ mod tests {
         let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
 
         let proxy_addr = ephemeral_addr().await;
-        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+        tokio::spawn(serve_with_extra_ca(
+            proxy_addr,
+            table,
+            Arc::clone(&authority),
+            Some(Arc::clone(&authority)),
+        ));
 
         let target = format!("localhost:{}", upstream_addr.port());
 
@@ -1110,7 +1154,12 @@ mod tests {
         let table = Arc::new(TokenTable::new(vec![rule_for("localhost")]));
 
         let proxy_addr = ephemeral_addr().await;
-        tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+        tokio::spawn(serve_with_extra_ca(
+            proxy_addr,
+            table,
+            Arc::clone(&authority),
+            Some(Arc::clone(&authority)),
+        ));
 
         let target = format!("localhost:{}", upstream_addr.port());
         let request = format!(

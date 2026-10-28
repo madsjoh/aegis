@@ -1,4 +1,4 @@
-//! End-to-end integration test for the gateway `serve` API.
+//! End to end integration test for the gateway `serve` API.
 //!
 //! Drives a real forward proxy through its public API against a local HTTPS
 //! upstream whose certificate is signed by the same authority the gateway uses
@@ -24,7 +24,7 @@ use aegis_core::ca::Authority;
 use aegis_core::policy::{CompiledRepoRule, GithubPolicy, Scope};
 use aegis_core::secrets::Permission;
 use aegis_core::token_table::{Rule, TokenTable};
-use aegis_gateway::proxy::serve;
+use aegis_gateway::proxy::serve_with_extra_ca;
 
 const PLACEHOLDER: &str = "github_pat_aegis_placeholder";
 const SECRET: &str = "github_pat_real_secret";
@@ -209,7 +209,12 @@ async fn placeholder_is_rewritten_and_read_only_push_is_denied() {
     let table = Arc::new(TokenTable::new(vec![rule]));
 
     let proxy_addr = ephemeral_addr().await;
-    tokio::spawn(serve(proxy_addr, table, Arc::clone(&authority)));
+    tokio::spawn(serve_with_extra_ca(
+        proxy_addr,
+        table,
+        Arc::clone(&authority),
+        Some(Arc::clone(&authority)),
+    ));
 
     let target = format!("localhost:{}", upstream_addr.port());
     let basic = format!(
@@ -217,7 +222,7 @@ async fn placeholder_is_rewritten_and_read_only_push_is_denied() {
         STANDARD.encode(format!("x-access-token:{PLACEHOLDER}"))
     );
 
-    // A git-style read request carrying the placeholder must reach the upstream
+    // A git style read request carrying the placeholder must reach the upstream
     // with the placeholder replaced by the real token.
     let read_request = format!(
         "GET /org/repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\n\
