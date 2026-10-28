@@ -4,6 +4,8 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    crane.url = "github:ipetkov/crane";
+
     home-manager = {
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,7 +17,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, home-manager, metis }:
+  outputs = { self, nixpkgs, crane, home-manager, metis }:
     let
       aegis = import ./helpers { inherit nixpkgs home-manager metis; };
       flakeRef = if (self.rev or "") != "" then "github:madsjoh/aegis/${self.rev}" else "path:${self.outPath}";
@@ -44,8 +46,17 @@
       packages = aegis.forAllSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          craneLib = crane.mkLib pkgs;
         in {
           "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.system.build.vm;
+          aegis-gateway = craneLib.buildPackage {
+            src = craneLib.cleanCargoSource (craneLib.path ./.);
+            pname = "aegis-gateway";
+            version = "0.1.0";
+            cargoExtraArgs = "--package aegis-gateway";
+            strictDeps = true;
+            doCheck = false;
+          };
           default = aegis.mkRunner { inherit pkgs system flakeRef; };
         });
 

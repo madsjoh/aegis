@@ -1,0 +1,4 @@
+[package]
+name = "aegis-core"
+version.workspace = true
+edition.workspace = true
