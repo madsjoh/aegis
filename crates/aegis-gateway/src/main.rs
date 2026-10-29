@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -93,7 +92,7 @@ async fn main() -> Result<(), BoxError> {
             let file =
                 decrypt(&secrets, &AgeSource::File(age_key)).map_err(BoxError::from_error)?;
             let selection = Selection::defaults(&file);
-            let mut auth: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+            let mut credentials: Vec<serde_json::Value> = Vec::new();
             for (name, spec) in catalog() {
                 if name == "github" || name == "copilot" {
                     continue;
@@ -101,20 +100,23 @@ async fn main() -> Result<(), BoxError> {
                 let Some(credential_name) = selection.credentials.get(&name) else {
                     continue;
                 };
-                let Some(credentials) = file.integrations.get(&name) else {
+                let Some(credentials_map) = file.integrations.get(&name) else {
                     continue;
                 };
-                let Some(credential) = credentials.get(credential_name) else {
+                let Some(credential) = credentials_map.get(credential_name) else {
                     continue;
                 };
                 if credential.api_key.is_some() {
-                    auth.insert(
-                        name,
-                        serde_json::json!({ "type": "api", "key": spec.placeholder }),
-                    );
+                    credentials.push(serde_json::json!({
+                        "id": format!("cred_aegis_{}", name),
+                        "integrationID": name,
+                        "label": "API key",
+                        "active": true,
+                        "value": { "type": "key", "key": spec.placeholder },
+                    }));
                 }
             }
-            let body = serde_json::to_string_pretty(&auth).map_err(BoxError::from_error)?;
+            let body = serde_json::to_string_pretty(&credentials).map_err(BoxError::from_error)?;
             std::fs::write(&out, body)?;
             std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
             Ok(())

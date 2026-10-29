@@ -42,11 +42,14 @@ let
         export NO_PROXY="${noProxy}"
         export no_proxy="${noProxy}"
         export GH_TOKEN="${githubPlaceholder}"
-        export GITHUB_TOKEN="${githubPlaceholder}"
         export GIT_CONFIG_COUNT=1
         export GIT_CONFIG_KEY_0="http.https://github.com/.extraHeader"
         export GIT_CONFIG_VALUE_0="${githubExtraHeader}"
       ''}
+
+      if [ -f /home/agent/.local/share/opencode/credentials.json ]; then
+        opencode auth import --standalone /home/agent/.local/share/opencode/credentials.json || true
+      fi
 
       cd /workspace
       exec opencode /workspace
@@ -170,7 +173,6 @@ in
         NO_PROXY = noProxy;
         no_proxy = noProxy;
         GH_TOKEN = githubPlaceholder;
-        GITHUB_TOKEN = githubPlaceholder;
         GIT_CONFIG_COUNT = "1";
         GIT_CONFIG_KEY_0 = "http.https://github.com/.extraHeader";
         GIT_CONFIG_VALUE_0 = githubExtraHeader;

@@ -103,7 +103,7 @@ pkgs.writeShellApplication {
       GATEWAY_PATH="$(nix build "${flakeRef}#aegis-gateway" --impure --no-link --print-out-paths)"
       AGE_KEY_FILE="''${XDG_CONFIG_HOME:-$HOME/.config}/sops/age/keys.txt"
       "$GATEWAY_PATH/bin/aegis-gateway" ensure-ca --ca-dir "$DATA_DIR/ca" --cert-out "$USER_CONFIG_DIR/ca.crt"
-      "$GATEWAY_PATH/bin/aegis-gateway" provision-auth --secrets "$USER_CONFIG_DIR/secrets.yaml" --age-key "$AGE_KEY_FILE" --out "$OPENCODE_SHARE_DIR/auth.json"
+      "$GATEWAY_PATH/bin/aegis-gateway" provision-auth --secrets "$USER_CONFIG_DIR/secrets.yaml" --age-key "$AGE_KEY_FILE" --out "$OPENCODE_SHARE_DIR/credentials.json"
       GATEWAY_ENABLED=1
       VM_PROXY_PORT=3128
     fi
