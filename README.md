@@ -257,9 +257,9 @@ the guest behaves as before.
 | Google    | `generativelanguage.googleapis.com` | `x-goog-api-key`  | `api_key`    |
 | DeepSeek  | `api.deepseek.com`                  | `authorization`   | `api_key`    |
 
-GitHub Copilot is not listed because it uses short lived OAuth tokens minted
-from your GitHub token rather than a static secret. Minting those tokens in the
-gateway is planned.
+GitHub Copilot is not in the table because it uses short lived OAuth tokens
+minted from your GitHub token, so it has no secret of its own. It is enabled
+with a boolean instead, as shown in the example below.
 
 ### secrets.yaml
 
@@ -296,6 +296,10 @@ google:
 deepseek:
   default:
     api_key: sk-xxxxxxxx
+
+copilot:
+  default:
+    enabled: true
 ```
 
 GitHub permissions use the fine grained names with `read` or `write` values.
