@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -115,6 +116,7 @@ async fn main() -> Result<(), BoxError> {
             }
             let body = serde_json::to_string_pretty(&auth).map_err(BoxError::from_error)?;
             std::fs::write(&out, body)?;
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
             Ok(())
         }
     }

@@ -37,7 +37,7 @@ pub fn catalog() -> BTreeMap<String, IntegrationSpec> {
             IntegrationSpec {
                 hosts: vec!["api.deepseek.com".to_string()],
                 auth_header: "authorization",
-                placeholder: "deepseek-aegis-placeholder",
+                placeholder: "sk-aegis-deepseek-placeholder",
             },
         ),
         (
@@ -58,7 +58,7 @@ pub fn catalog() -> BTreeMap<String, IntegrationSpec> {
             IntegrationSpec {
                 hosts: vec!["generativelanguage.googleapis.com".to_string()],
                 auth_header: "x-goog-api-key",
-                placeholder: "google-aegis-placeholder",
+                placeholder: "AQ.aegis-placeholder",
             },
         ),
         (
@@ -85,13 +85,17 @@ mod tests {
         assert_eq!(catalog()["anthropic"].auth_header, "x-api-key");
         assert_eq!(catalog()["google"].auth_header, "x-goog-api-key");
         assert_eq!(
+            catalog()["google"].placeholder,
+            "AQ.aegis-placeholder"
+        );
+        assert_eq!(
             catalog()["google"].hosts,
             vec!["generativelanguage.googleapis.com".to_string()]
         );
         assert_eq!(catalog()["deepseek"].auth_header, "authorization");
         assert_eq!(
             catalog()["deepseek"].placeholder,
-            "deepseek-aegis-placeholder"
+            "sk-aegis-deepseek-placeholder"
         );
     }
 }
