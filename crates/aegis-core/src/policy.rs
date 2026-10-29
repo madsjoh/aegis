@@ -53,16 +53,36 @@ pub struct CompiledRepoRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubPolicy {
     rules: Vec<CompiledRepoRule>,
+    allow_copilot: bool,
 }
 
 impl GithubPolicy {
     /// Build a policy from already compiled rules.
     pub fn new(rules: Vec<CompiledRepoRule>) -> GithubPolicy {
-        GithubPolicy { rules }
+        GithubPolicy {
+            rules,
+            allow_copilot: false,
+        }
+    }
+
+    /// Allow the Copilot token minting endpoint, gating it on an explicit
+    /// opt in rather than leaking it through the repository policy.
+    pub fn allow_copilot(mut self, enabled: bool) -> GithubPolicy {
+        self.allow_copilot = enabled;
+        self
     }
 
     /// Decide whether a request is allowed under this policy.
     pub fn evaluate(&self, method: &str, path_and_query: &str) -> Decision {
+        let path = path_and_query.split('?').next().unwrap_or(path_and_query);
+        if path == "/copilot_internal" || path.starts_with("/copilot_internal/") {
+            return if self.allow_copilot {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            };
+        }
+
         let request = match classify(method, path_and_query) {
             Classification::OutsideRepo => {
                 return match access_for_method(method) {
@@ -417,6 +437,25 @@ mod tests {
         assert_eq!(
             policy.evaluate("POST", "/repos/org/other/contents/x"),
             Decision::Deny
+        );
+    }
+
+    #[test]
+    fn copilot_internal_is_denied_by_default() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
+        assert_eq!(
+            policy.evaluate("GET", "/copilot_internal/v2/token"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn copilot_internal_is_allowed_when_enabled() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)])
+            .allow_copilot(true);
+        assert_eq!(
+            policy.evaluate("GET", "/copilot_internal/v2/token"),
+            Decision::Allow
         );
     }
 }

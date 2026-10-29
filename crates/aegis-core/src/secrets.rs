@@ -32,6 +32,8 @@ pub struct Credential {
     pub api_key: Option<String>,
     #[serde(default)]
     pub repositories: Vec<RepoRule>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 impl std::fmt::Debug for Credential {
@@ -192,6 +194,7 @@ mod tests {
             pat: Some("super_secret_pat".to_string()),
             api_key: Some("super_secret_api_key".to_string()),
             repositories: vec![],
+            enabled: None,
         };
         let secrets = SecretsFile {
             integrations: BTreeMap::from([(

@@ -25,6 +25,14 @@ pub fn catalog() -> BTreeMap<String, IntegrationSpec> {
             },
         ),
         (
+            "copilot".to_string(),
+            IntegrationSpec {
+                hosts: vec!["api.githubcopilot.com".to_string()],
+                auth_header: "authorization",
+                placeholder: "copilot-aegis-placeholder",
+            },
+        ),
+        (
             "deepseek".to_string(),
             IntegrationSpec {
                 hosts: vec!["api.deepseek.com".to_string()],

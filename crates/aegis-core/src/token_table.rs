@@ -71,6 +71,7 @@ impl TokenTable {
     /// Build a token table from the catalog, secrets, and a credential selection.
     pub fn build(secrets: &SecretsFile, selection: &Selection) -> Result<TokenTable, BuildError> {
         let mut rules = Vec::new();
+        let mut allow_copilot = false;
 
         for (integration, spec) in catalog() {
             let Some(credential_name) = selection.credentials.get(&integration) else {
@@ -86,6 +87,11 @@ impl TokenTable {
                 });
             };
 
+            if integration == "copilot" {
+                allow_copilot = credential.enabled.unwrap_or(false);
+                continue;
+            }
+
             let secret = credential
                 .pat
                 .clone()
@@ -96,9 +102,10 @@ impl TokenTable {
                 })?;
 
             let policy = if integration == "github" {
-                Some(GithubPolicy::new(compile_repositories(
-                    &credential.repositories,
-                )))
+                Some(
+                    GithubPolicy::new(compile_repositories(&credential.repositories))
+                        .allow_copilot(allow_copilot),
+                )
             } else {
                 None
             };
@@ -207,6 +214,7 @@ mod tests {
             pat: pat.map(|value| value.to_string()),
             api_key: api_key.map(|value| value.to_string()),
             repositories,
+            enabled: None,
         }
     }
 
@@ -381,5 +389,55 @@ mod tests {
         let table_debug = format!("{table:?}");
         assert!(table_debug.contains("[REDACTED]"));
         assert!(!table_debug.contains("super_secret_token"));
+    }
+
+    #[test]
+    fn copilot_enabled_allows_github_minting() {
+        use crate::policy::Decision;
+
+        let secrets = secrets_with(BTreeMap::from([
+            (
+                "github".to_string(),
+                BTreeMap::from([("personal".to_string(), credential(Some("ghp"), None, vec![]))]),
+            ),
+            (
+                "copilot".to_string(),
+                BTreeMap::from([(
+                    "default".to_string(),
+                    Credential {
+                        pat: None,
+                        api_key: None,
+                        repositories: vec![],
+                        enabled: Some(true),
+                    },
+                )]),
+            ),
+        ]));
+        let selection = Selection::defaults(&secrets);
+        let table = TokenTable::build(&secrets, &selection).expect("build succeeds");
+        let github = table.matching_rule("api.github.com").expect("github rule");
+        let policy = github.policy.as_ref().expect("github policy");
+        assert_eq!(
+            policy.evaluate("GET", "/copilot_internal/v2/token"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn copilot_absent_denies_github_minting() {
+        use crate::policy::Decision;
+
+        let secrets = secrets_with(BTreeMap::from([(
+            "github".to_string(),
+            BTreeMap::from([("personal".to_string(), credential(Some("ghp"), None, vec![]))]),
+        )]));
+        let selection = Selection::defaults(&secrets);
+        let table = TokenTable::build(&secrets, &selection).expect("build succeeds");
+        let github = table.matching_rule("api.github.com").expect("github rule");
+        let policy = github.policy.as_ref().expect("github policy");
+        assert_eq!(
+            policy.evaluate("GET", "/copilot_internal/v2/token"),
+            Decision::Deny
+        );
     }
 }
