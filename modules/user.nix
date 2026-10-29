@@ -9,6 +9,14 @@ let
     in
     if value == "" then default else builtins.fromJSON value;
 
+  proxyPort = builtins.getEnv "VM_PROXY_PORT";
+  gatewayEnabled = proxyPort != "";
+  proxyUrl = "http://127.0.0.1:${proxyPort}";
+  caBundle = "/run/aegis/ca-bundle.crt";
+  githubPlaceholder = "github_pat_aegis_placeholder";
+  githubExtraHeader = "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2l0aHViX3BhdF9hZWdpc19wbGFjZWhvbGRlcg==";
+  noProxy = "127.0.0.1,localhost,::1";
+
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
     runtimeInputs = with pkgs; [ coreutils opencode ];
@@ -18,6 +26,30 @@ let
       prepare_opencode "/aegis/opencode.jsonc"
 
       export GIT_CONFIG_GLOBAL=/run/aegis/gitconfig/.gitconfig
+
+      export SSL_CERT_FILE="${caBundle}"
+      export GIT_SSL_CAINFO="${caBundle}"
+      export NIX_SSL_CERT_FILE="${caBundle}"
+      export REQUESTS_CA_BUNDLE="${caBundle}"
+      export NODE_EXTRA_CA_CERTS="${caBundle}"
+      ${lib.optionalString gatewayEnabled ''
+        export HTTPS_PROXY="${proxyUrl}"
+        export HTTP_PROXY="${proxyUrl}"
+        export ALL_PROXY="${proxyUrl}"
+        export https_proxy="${proxyUrl}"
+        export http_proxy="${proxyUrl}"
+        export all_proxy="${proxyUrl}"
+        export NO_PROXY="${noProxy}"
+        export no_proxy="${noProxy}"
+        export GH_TOKEN="${githubPlaceholder}"
+        export GIT_CONFIG_COUNT=1
+        export GIT_CONFIG_KEY_0="http.https://github.com/.extraHeader"
+        export GIT_CONFIG_VALUE_0="${githubExtraHeader}"
+      ''}
+
+      if [ -f /home/agent/.local/share/opencode/credentials.json ]; then
+        opencode auth import --standalone /home/agent/.local/share/opencode/credentials.json || true
+      fi
 
       cd /workspace
       exec opencode /workspace
@@ -126,6 +158,24 @@ in
 
       home.sessionVariables = {
         JAVA_HOME = "${pkgs.temurin-bin-27.home}";
+        SSL_CERT_FILE = caBundle;
+        GIT_SSL_CAINFO = caBundle;
+        NIX_SSL_CERT_FILE = caBundle;
+        REQUESTS_CA_BUNDLE = caBundle;
+        NODE_EXTRA_CA_CERTS = caBundle;
+      } // lib.optionalAttrs gatewayEnabled {
+        HTTPS_PROXY = proxyUrl;
+        HTTP_PROXY = proxyUrl;
+        ALL_PROXY = proxyUrl;
+        https_proxy = proxyUrl;
+        http_proxy = proxyUrl;
+        all_proxy = proxyUrl;
+        NO_PROXY = noProxy;
+        no_proxy = noProxy;
+        GH_TOKEN = githubPlaceholder;
+        GIT_CONFIG_COUNT = "1";
+        GIT_CONFIG_KEY_0 = "http.https://github.com/.extraHeader";
+        GIT_CONFIG_VALUE_0 = githubExtraHeader;
       };
 
       home.stateVersion = "24.05";
