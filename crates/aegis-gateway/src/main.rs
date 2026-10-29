@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -5,6 +6,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use aegis_core::ca::Authority;
+use aegis_core::catalog::catalog;
 use aegis_core::secrets::{decrypt, AgeSource};
 use aegis_core::token_table::{Selection, TokenTable};
 
@@ -43,6 +45,18 @@ enum Command {
         #[arg(long)]
         age_key: PathBuf,
     },
+    /// Write the placeholder auth.json for the configured API key providers.
+    ProvisionAuth {
+        /// Path to the sops encrypted secrets file.
+        #[arg(long)]
+        secrets: PathBuf,
+        /// Path to the age key file.
+        #[arg(long)]
+        age_key: PathBuf,
+        /// Path to write the auth.json file.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -69,6 +83,39 @@ async fn main() -> Result<(), BoxError> {
             let table =
                 Arc::new(TokenTable::build(&file, &selection).map_err(BoxError::from_error)?);
             proxy::serve(listen, table, authority).await
+        }
+        Command::ProvisionAuth {
+            secrets,
+            age_key,
+            out,
+        } => {
+            let file =
+                decrypt(&secrets, &AgeSource::File(age_key)).map_err(BoxError::from_error)?;
+            let selection = Selection::defaults(&file);
+            let mut auth: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+            for (name, spec) in catalog() {
+                if name == "github" || name == "copilot" {
+                    continue;
+                }
+                let Some(credential_name) = selection.credentials.get(&name) else {
+                    continue;
+                };
+                let Some(credentials) = file.integrations.get(&name) else {
+                    continue;
+                };
+                let Some(credential) = credentials.get(credential_name) else {
+                    continue;
+                };
+                if credential.api_key.is_some() {
+                    auth.insert(
+                        name,
+                        serde_json::json!({ "type": "api", "key": spec.placeholder }),
+                    );
+                }
+            }
+            let body = serde_json::to_string_pretty(&auth).map_err(BoxError::from_error)?;
+            std::fs::write(&out, body)?;
+            Ok(())
         }
     }
 }
