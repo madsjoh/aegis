@@ -15,6 +15,7 @@ let
   caBundle = "/run/aegis/ca-bundle.crt";
   githubPlaceholder = "github_pat_aegis_placeholder";
   githubExtraHeader = "Authorization: Basic eC1hY2Nlc3MtdG9rZW46Z2l0aHViX3BhdF9hZWdpc19wbGFjZWhvbGRlcg==";
+  noProxy = "127.0.0.1,localhost,::1";
 
   opencodeShell = pkgs.writeShellApplication {
     name = "opencode-shell";
@@ -38,6 +39,8 @@ let
         export https_proxy="${proxyUrl}"
         export http_proxy="${proxyUrl}"
         export all_proxy="${proxyUrl}"
+        export NO_PROXY="${noProxy}"
+        export no_proxy="${noProxy}"
         export GH_TOKEN="${githubPlaceholder}"
         export GITHUB_TOKEN="${githubPlaceholder}"
         export GIT_CONFIG_COUNT=1
@@ -164,6 +167,8 @@ in
         https_proxy = proxyUrl;
         http_proxy = proxyUrl;
         all_proxy = proxyUrl;
+        NO_PROXY = noProxy;
+        no_proxy = noProxy;
         GH_TOKEN = githubPlaceholder;
         GITHUB_TOKEN = githubPlaceholder;
         GIT_CONFIG_COUNT = "1";
