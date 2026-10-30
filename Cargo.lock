@@ -42,7 +42,10 @@ name = "aegis-runner"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "serde",
+ "serde_json",
  "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
