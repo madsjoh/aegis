@@ -10,12 +10,10 @@ let
     then nixpkgs.lib.replaceStrings [ "-darwin" ] [ "-linux" ] system
     else system;
 
-  mkRunner = import ./runner.nix { inherit guestSystem; };
-
   mkVmConfig = import ./guest.nix {
     inherit nixpkgs home-manager metis guestSystem;
   };
 in
 {
-  inherit hostSystems forAllSystems guestSystem mkRunner mkVmConfig;
+  inherit hostSystems forAllSystems guestSystem mkVmConfig;
 }

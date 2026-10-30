@@ -24,6 +24,19 @@
       systemModule = { pkgs, ... }: {
         environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
       };
+
+      craneFor = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          craneLib = crane.mkLib pkgs;
+          cargoSrc = pkgs.lib.cleanSourceWith {
+            src = craneLib.path ./.;
+            filter = path: type:
+              (pkgs.lib.hasInfix "/tests/fixtures/" path)
+              || (craneLib.filterCargoSources path type);
+          };
+          isDarwin = pkgs.lib.hasSuffix "-darwin" system;
+        in { inherit pkgs craneLib cargoSrc isDarwin; };
     in {
       nixosModules.default = systemModule;
 
@@ -33,25 +46,29 @@
         home.packages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
       };
 
-      apps = aegis.forAllSystems (system:
-        let
-          pkgs = nixpkgs.legacyPackages.${system};
-        in {
-          default = {
-            type = "app";
-            program = "${aegis.mkRunner { inherit pkgs system flakeRef; }}/bin/aegis";
-          };
-        });
+      apps = aegis.forAllSystems (system: {
+        default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/aegis";
+        };
+      });
 
       packages = aegis.forAllSystems (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
-          craneLib = crane.mkLib pkgs;
-          cargoSrc = pkgs.lib.cleanSourceWith {
-            src = craneLib.path ./.;
-            filter = path: type:
-              (pkgs.lib.hasInfix "/tests/fixtures/" path)
-              || (craneLib.filterCargoSources path type);
+          inherit (craneFor system) pkgs craneLib cargoSrc isDarwin;
+          runner-tools = [ pkgs.nix pkgs.openssh pkgs.sops ]
+            ++ pkgs.lib.optionals (!isDarwin) [ pkgs.virtiofsd ];
+          aegis-runner = craneLib.buildPackage {
+            src = cargoSrc;
+            pname = "aegis-runner";
+            version = "0.1.0";
+            cargoExtraArgs = "--package aegis-runner";
+            strictDeps = true;
+            doCheck = true;
+            nativeCheckInputs = [ pkgs.openssh ];
+            AEGIS_FLAKE_REF = flakeRef;
+            AEGIS_HOST_SYSTEM = system;
+            AEGIS_GUEST_SYSTEM = aegis.guestSystem system;
           };
         in {
           "aegis-vm-${system}" = self.nixosConfigurations."aegis-vm-${system}".config.system.build.vm;
@@ -64,19 +81,18 @@
             doCheck = true;
             nativeCheckInputs = [ pkgs.sops ];
           };
-          default = aegis.mkRunner { inherit pkgs system flakeRef; };
+          default = pkgs.runCommand "aegis" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p "$out/bin"
+            makeWrapper "${aegis-runner}/bin/aegis" "$out/bin/aegis" \
+              --prefix PATH : "${pkgs.lib.makeBinPath runner-tools}"
+          '';
         });
 
       checks = aegis.forAllSystems (system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
-          craneLib = crane.mkLib pkgs;
-          cargoSrc = pkgs.lib.cleanSourceWith {
-            src = craneLib.path ./.;
-            filter = path: type:
-              (pkgs.lib.hasInfix "/tests/fixtures/" path)
-              || (craneLib.filterCargoSources path type);
-          };
+          inherit (craneFor system) pkgs craneLib cargoSrc;
           cargoArtifacts = craneLib.buildDepsOnly {
             src = cargoSrc;
             pname = "aegis-workspace";
@@ -90,74 +106,15 @@
             pname = "aegis-workspace";
             version = "0.1.0";
             strictDeps = true;
-            nativeCheckInputs = [ pkgs.sops ];
+            nativeCheckInputs = [ pkgs.sops pkgs.openssh ];
           };
 
-          lock = pkgs.runCommand "aegis-lock-test" {
-            buildInputs = [ pkgs.util-linux ];
-          } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-lock.sh} ${./helpers/lock.bash}
-            touch "$out"
-          '';
-
-          runner-cache = pkgs.runCommand "aegis-runner-cache-test" {
-            buildInputs = [ pkgs.openssh pkgs.util-linux ];
-          } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-runner-cache.sh} ${./helpers/runner.nix} ${./helpers/lock.bash} ${./helpers/ssh-key.bash} ${./helpers/runner-lifecycle.bash}
-            touch "$out"
-          '';
-
-          runner-config = pkgs.runCommand "aegis-runner-config-test" {
-            buildInputs = [ pkgs.coreutils ];
-          } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-runner-config.sh} ${self.packages.${system}.default}/bin/aegis
-            touch "$out"
-          '';
-
-          store-cache = pkgs.runCommand "aegis-store-cache-test" {
-            buildInputs = [ pkgs.util-linux ];
-          } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-store-cache.sh} ${./helpers/lock.bash} ${./helpers/store-cache.bash}
-            touch "$out"
-          '';
-
-          config = pkgs.runCommand "aegis-config-test" { buildInputs = [ pkgs.jq ]; } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-config.sh} ${./helpers/config.bash}
-            touch "$out"
-          '';
-
-          qemu-override = pkgs.runCommand "aegis-qemu-override-test" {
+          runner-binary = pkgs.runCommand "aegis-runner-binary-test" {
             buildInputs = [ pkgs.gnugrep ];
           } ''
-            grep --fixed-strings --quiet 'memory-backend=aegis-ram' ${self.packages.${system}.default}/bin/aegis
-            touch "$out"
-          '';
-
-          gateway-orchestration = pkgs.runCommand "aegis-gateway-orchestration-test" {
-            buildInputs = [ pkgs.gnugrep ];
-          } ''
-            grep --fixed-strings --quiet 'ensure-ca' ${self.packages.${system}.default}/bin/aegis
-            grep --fixed-strings --quiet -- '-o ExitOnForwardFailure=yes' ${self.packages.${system}.default}/bin/aegis
-            grep --fixed-strings --quiet -- '-R "3128:127.0.0.1:$VM_PROXY_HOST_PORT"' ${self.packages.${system}.default}/bin/aegis
-            touch "$out"
-          '';
-
-          scaffold = pkgs.runCommand "aegis-scaffold-test" {
-            buildInputs = [ pkgs.jq pkgs.coreutils ];
-          } ''
             set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-scaffold.sh} ${./helpers/scaffold.bash}
-            touch "$out"
-          '';
-
-          wait-for-ssh = pkgs.runCommand "aegis-wait-for-ssh-test" { } ''
-            set -o errexit -o nounset -o pipefail
-            bash ${./tests/test-wait-for-ssh.sh} ${./helpers/wait-for-ssh.bash}
+            ${self.packages.${system}.default}/bin/aegis help > "$TMPDIR/help" 2>&1 || { cat "$TMPDIR/help"; exit 1; }
+            grep --fixed-strings --quiet 'Usage: aegis [run [args...] | help]' "$TMPDIR/help"
             touch "$out"
           '';
 
