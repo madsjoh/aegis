@@ -4,6 +4,7 @@ mod config;
 mod lock;
 mod paths;
 mod ssh_key;
+mod store_cache;
 
 use std::process::ExitCode;
 
