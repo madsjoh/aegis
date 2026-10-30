@@ -1,5 +1,6 @@
 //! The Aegis runner: orchestrate the guest VM and gateway on the host.
 
+mod config;
 mod paths;
 
 use std::process::ExitCode;
