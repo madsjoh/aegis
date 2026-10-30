@@ -1,6 +1,7 @@
 //! The Aegis runner: orchestrate the guest VM and gateway on the host.
 
 mod config;
+mod env;
 mod lock;
 mod paths;
 mod ssh_key;
