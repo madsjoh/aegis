@@ -3,6 +3,7 @@
 mod config;
 mod lock;
 mod paths;
+mod ssh_key;
 
 use std::process::ExitCode;
 
