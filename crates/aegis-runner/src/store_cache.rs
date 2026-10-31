@@ -51,7 +51,7 @@ pub fn publish_store_images(state: &Path, cache: &Path) -> std::io::Result<()> {
 }
 
 /// Wait until the exact line `[vzvm] guest started` appears in the log, failing
-/// once the process with `pid` is gone.
+/// if `child` exits first.
 pub fn wait_for_guest_start(child: &mut Child, log: &Path) -> Result<(), GuestStartError> {
     loop {
         if let Some(signal) = crate::signal::take() {

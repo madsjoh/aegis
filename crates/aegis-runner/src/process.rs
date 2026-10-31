@@ -103,9 +103,7 @@ pub fn wait_for_ssh(
 
         if child.try_wait().map_err(ProcessError::Probe)?.is_some() {
             eprintln!("Error: The Aegis VM exited before SSH became available.");
-            if let Ok(content) = std::fs::read_to_string(log) {
-                eprint!("{content}");
-            }
+            dump_log(log);
             return Err(ProcessError::VmExited);
         }
 
