@@ -22,7 +22,7 @@ fn fake_nix_dir(capture: &Path) -> PathBuf {
     let script = format!(
         "#!/bin/sh\n\
          if [ \"$1\" != \"build\" ]; then exit 2; fi\n\
-         printf '%s\\n' \"$HOST_CONFIG\" \"$VM_CPU\" \"$VM_MEM\" \"$VM_SKILL_ANTHROPIC\" \"$VM_SKILL_MATTPOCOCK\" \"$VM_SKILL_VERCEL\" > \"{}\"\n\
+         printf '%s\\n' \"$HOST_WORKSPACE\" \"$HOST_CONFIG\" \"$VM_CPU\" \"$VM_MEM\" \"$VM_SKILL_ANTHROPIC\" \"$VM_SKILL_MATTPOCOCK\" \"$VM_SKILL_VERCEL\" > \"{}\"\n\
          exit 1\n",
         capture.display()
     );
@@ -115,7 +115,8 @@ fn runner_resolves_and_shares_user_configuration() {
 
     assert_eq!(result.status, 1, "runner must exit with the nix build status");
     let expected = format!(
-        "{}\n6\n8192\ntrue\nfalse\nfalse\n",
+        "{}\n{}\n6\n8192\ntrue\nfalse\nfalse\n",
+        std::fs::canonicalize(&env.workspace).unwrap().display(),
         env.config_dir().display()
     );
     assert_eq!(std::fs::read_to_string(&capture).unwrap(), expected);
@@ -156,7 +157,11 @@ fn xdg_config_home_with_a_space_is_honored() {
     let result = run_runner(&env, &nix_dir);
 
     assert_eq!(result.status, 1);
-    let expected = format!("{}\n2\n2048\nfalse\nfalse\nfalse\n", env.config_dir().display());
+    let expected = format!(
+        "{}\n{}\n2\n2048\nfalse\nfalse\nfalse\n",
+        std::fs::canonicalize(&env.workspace).unwrap().display(),
+        env.config_dir().display()
+    );
     assert_eq!(std::fs::read_to_string(&capture).unwrap(), expected);
     assert!(
         result.output.contains(&format!("Config    : {}", env.config_dir().display())),

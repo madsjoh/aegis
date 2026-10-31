@@ -2,6 +2,7 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
+use std::process::Child;
 
 const GUEST_STARTED_MARKER: &str = "[vzvm] guest started";
 
@@ -10,6 +11,10 @@ const GUEST_STARTED_MARKER: &str = "[vzvm] guest started";
 pub enum GuestStartError {
     #[error("the VM exited before the guest started")]
     VmExited,
+    #[error("failed to probe the VM: {0}")]
+    Probe(#[source] std::io::Error),
+    #[error("interrupted by signal {0}")]
+    Interrupted(i32),
 }
 
 /// Symlink every regular `store-*.img` file in `cache` into `state`.
@@ -46,10 +51,14 @@ pub fn publish_store_images(state: &Path, cache: &Path) -> std::io::Result<()> {
 }
 
 /// Wait until the exact line `[vzvm] guest started` appears in the log, failing
-/// once the process with `pid` is gone.
-pub fn wait_for_guest_start(pid: u32, log: &Path) -> Result<(), GuestStartError> {
+/// if `child` exits first.
+pub fn wait_for_guest_start(child: &mut Child, log: &Path) -> Result<(), GuestStartError> {
     loop {
-        if !process_exists(pid) {
+        if let Some(signal) = crate::signal::take() {
+            return Err(GuestStartError::Interrupted(signal));
+        }
+        if child.try_wait().map_err(GuestStartError::Probe)?.is_some() {
+            crate::process::dump_log(log);
             return Err(GuestStartError::VmExited);
         }
         if log_has_marker(log) {
@@ -62,12 +71,6 @@ pub fn wait_for_guest_start(pid: u32, log: &Path) -> Result<(), GuestStartError>
 fn is_store_image(name: &OsStr) -> bool {
     let name = name.to_string_lossy();
     name.starts_with("store-") && name.ends_with(".img")
-}
-
-fn process_exists(pid: u32) -> bool {
-    // A signal of 0 performs error checking only: it succeeds while the
-    // process exists and fails with ESRCH once it is gone.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 fn log_has_marker(log: &Path) -> bool {
@@ -154,14 +157,15 @@ mod tests {
     fn wait_for_guest_start_ignores_partial_matches() {
         let log = temp_dir("partial").join("vm.log");
         let mut child = Command::new("sleep").arg("10").spawn().unwrap();
-        let pid = child.id();
 
         std::fs::write(&log, "prefix [vzvm] guest started suffix\n").unwrap();
 
         let log2 = log.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
-            let result = wait_for_guest_start(pid, &log2);
+            let result = wait_for_guest_start(&mut child, &log2);
+            let _ = child.kill();
+            let _ = child.wait();
             tx.send(result.is_ok()).unwrap();
         });
 
@@ -171,30 +175,34 @@ mod tests {
         std::fs::write(&log, "[vzvm] guest started\n").unwrap();
         assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
         waiter.join().unwrap();
-
-        child.kill().unwrap();
-        child.wait().unwrap();
     }
 
     #[test]
-    fn wait_for_guest_start_fails_when_the_process_is_gone() {
-        let log = temp_dir("stale").join("vm.log");
-        std::fs::write(&log, "[vzvm] guest started\n").unwrap();
+    fn wait_for_guest_start_fails_when_the_process_is_a_zombie() {
+        let log = temp_dir("zombie").join("vm.log");
+        let mut child = Command::new("true").spawn().unwrap();
+        assert!(matches!(
+            wait_for_guest_start(&mut child, &log),
+            Err(GuestStartError::VmExited)
+        ));
+    }
 
+    #[test]
+    fn wait_for_guest_start_reports_vm_exited_even_after_the_marker() {
+        let log = temp_dir("marker-dead").join("vm.log");
         let mut child = Command::new("sleep").arg("0.1").spawn().unwrap();
-        let pid = child.id();
-        child.wait().unwrap();
-
-        let start = std::time::Instant::now();
-        assert!(wait_for_guest_start(pid, &log).is_err());
-        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        std::fs::write(&log, "[vzvm] guest started\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(matches!(
+            wait_for_guest_start(&mut child, &log),
+            Err(GuestStartError::VmExited)
+        ));
     }
 
     #[test]
     fn wait_for_guest_start_returns_ok_on_the_exact_marker() {
         let log = temp_dir("success").join("vm.log");
         let mut child = Command::new("sleep").arg("10").spawn().unwrap();
-        let pid = child.id();
 
         let log2 = log.clone();
         let handle = std::thread::spawn(move || {
@@ -202,10 +210,27 @@ mod tests {
             std::fs::write(&log2, "[vzvm] guest started\n").unwrap();
         });
 
-        wait_for_guest_start(pid, &log).unwrap();
+        wait_for_guest_start(&mut child, &log).unwrap();
         handle.join().unwrap();
 
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn wait_for_guest_start_returns_interrupted_when_a_signal_is_pending() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
+
+        let log = temp_dir("interrupted").join("vm.log");
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        crate::signal::set_for_test(libc::SIGINT);
+
+        assert!(matches!(
+            wait_for_guest_start(&mut child, &log),
+            Err(GuestStartError::Interrupted(libc::SIGINT))
+        ));
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

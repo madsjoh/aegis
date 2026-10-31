@@ -5,13 +5,14 @@ mod env;
 mod lock;
 mod paths;
 mod process;
+mod signal;
 mod ssh_key;
 mod store_cache;
 
+use std::io::Read;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 use lock::FileLock;
@@ -38,8 +39,6 @@ const GUEST_SYSTEM: &str = match option_env!("AEGIS_GUEST_SYSTEM") {
 const GUEST_PROXY_PORT: u16 = 3128;
 const SSH_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-static SIGNAL_FLAG: AtomicI32 = AtomicI32::new(0);
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -62,10 +61,11 @@ fn main() -> ExitCode {
 enum RunnerError {
     Command { message: String, code: i32 },
     Other(String),
+    Interrupted(i32),
 }
 
 fn run(forwarded: &[String]) -> ExitCode {
-    install_signal_handlers();
+    signal::install();
     match orchestrate(forwarded) {
         Ok(code) => code,
         Err(RunnerError::Command { message, code }) => {
@@ -74,6 +74,7 @@ fn run(forwarded: &[String]) -> ExitCode {
             }
             ExitCode::from(code.clamp(0, 255) as u8)
         }
+        Err(RunnerError::Interrupted(signal)) => signal::exit_code(signal),
         Err(RunnerError::Other(message)) => {
             eprintln!("Error: {message}");
             ExitCode::FAILURE
@@ -89,7 +90,13 @@ fn workspace_path() -> PathBuf {
     if let Some(pwd) = std::env::var_os("PWD") {
         let path = PathBuf::from(pwd);
         if path.is_absolute() {
-            return path;
+            let names_current_dir = match (path.canonicalize(), std::env::current_dir()) {
+                (Ok(canonical), Ok(cwd)) => canonical == cwd,
+                _ => false,
+            };
+            if names_current_dir {
+                return path;
+            }
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -116,21 +123,55 @@ fn apply_env(command: &mut Command, env: &[(String, String)]) {
 }
 
 fn run_checked(mut command: Command) -> Result<std::process::Output, RunnerError> {
-    let child = command
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| RunnerError::Other(error.to_string()))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|error| RunnerError::Other(error.to_string()))?;
-    if !output.status.success() {
+    let status = loop {
+        if let Some(signal) = signal::take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunnerError::Interrupted(signal));
+        }
+        match child
+            .try_wait()
+            .map_err(|error| RunnerError::Other(error.to_string()))?
+        {
+            Some(status) => break status,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let mut stdout = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_end(&mut stdout)
+            .map_err(|error| RunnerError::Other(error.to_string()))?;
+    }
+    if !status.success() {
         return Err(RunnerError::Command {
             message: String::new(),
-            code: output.status.code().unwrap_or(1),
+            code: status.code().unwrap_or(1),
         });
     }
-    Ok(output)
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
+fn process_to_runner(error: ProcessError) -> RunnerError {
+    match error {
+        ProcessError::Interrupted(signal) => RunnerError::Interrupted(signal),
+        other => RunnerError::Other(other.to_string()),
+    }
+}
+
+fn guest_start_to_runner(error: store_cache::GuestStartError) -> RunnerError {
+    match error {
+        store_cache::GuestStartError::Interrupted(signal) => RunnerError::Interrupted(signal),
+        other => RunnerError::Other(other.to_string()),
+    }
 }
 
 fn nix_build(target: &str, env: &[(String, String)]) -> Result<String, RunnerError> {
@@ -235,6 +276,18 @@ fn socket_exists(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.file_type().is_socket())
         .unwrap_or(false)
+}
+
+fn dump_virtiofsd_logs(run_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("virtiofsd-") && name.ends_with(".log") {
+                process::dump_log(&entry.path());
+            }
+        }
+    }
 }
 
 fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
@@ -380,12 +433,16 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 
         let mut ready = false;
         for _ in 0..50 {
+            if let Some(signal) = signal::take() {
+                return Err(RunnerError::Interrupted(signal));
+            }
             ready = virtiofsd_sockets.iter().all(|socket| socket_exists(socket));
             if ready {
                 break;
             }
             for child in &mut children.virtiofsd {
                 if child.try_wait().map_err(|e| RunnerError::Other(e.to_string()))?.is_some() {
+                    dump_virtiofsd_logs(&p.run_dir);
                     return Err(RunnerError::Other(
                         "A virtiofs daemon exited before becoming ready.".to_string(),
                     ));
@@ -394,6 +451,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             std::thread::sleep(Duration::from_millis(200));
         }
         if !ready {
+            dump_virtiofsd_logs(&p.run_dir);
             return Err(RunnerError::Other(
                 "Timed out waiting for the virtiofs daemons.".to_string(),
             ));
@@ -423,7 +481,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             "listening on",
             SSH_WAIT_TIMEOUT,
         )
-        .map_err(|e| RunnerError::Other(e.to_string()))?;
+        .map_err(process_to_runner)?;
     }
 
     let vm_log = p.run_dir.join("vm.log");
@@ -431,9 +489,10 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 
     println!("Booting the guest...");
     let vm_command_path = format!("{vm_path}/bin/run-aegis-vm");
+    let mut image_lock: Option<FileLock> = None;
     if is_darwin() {
-        let _image_lock = FileLock::acquire_blocking(&p.image_lock_file)
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        image_lock = Some(FileLock::acquire_blocking(&p.image_lock_file)
+            .map_err(|e| RunnerError::Other(e.to_string()))?);
         store_cache::link_shared_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         let mut command = Command::new(&vm_command_path);
@@ -442,7 +501,6 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         let child = process::spawn_logged(command, &vm_log)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         children.vm = Some(child);
-        drop(_image_lock);
     } else {
         let mut command = Command::new(&vm_command_path);
         command.env(
@@ -468,10 +526,13 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 
     if is_darwin() {
         let vm_child = children.vm.as_mut().expect("vm spawned");
-        store_cache::wait_for_guest_start(vm_child.id(), &vm_log)
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        store_cache::wait_for_guest_start(vm_child, &vm_log)
+            .map_err(guest_start_to_runner)?;
         store_cache::publish_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
+        // The lock must cover publication so two runners sharing one cache
+        // directory cannot race the rename and symlink of store images.
+        drop(image_lock.take());
     }
 
     let ssh_target = if is_darwin() {
@@ -497,7 +558,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
     let probe_refs: Vec<&str> = probe_target.iter().map(String::as_str).collect();
     let vm_child = children.vm.as_mut().expect("vm spawned");
     process::wait_for_ssh(vm_child, &probe_refs, &p.ssh_key, &vm_log)
-        .map_err(|e| RunnerError::Other(e.to_string()))?;
+        .map_err(process_to_runner)?;
 
     if gateway_enabled {
         let tunnel_log = p.run_dir.join("reverse-tunnel.log");
@@ -530,7 +591,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             "remote forward success",
             SSH_WAIT_TIMEOUT,
         )
-        .map_err(|e| RunnerError::Other(e.to_string()))?;
+        .map_err(process_to_runner)?;
     }
 
     let mut attach = Command::new("ssh");
@@ -558,12 +619,11 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
                 return Ok(ExitCode::from(status.code().unwrap_or(0).clamp(0, 255) as u8));
             }
             None => {
-                let signal = SIGNAL_FLAG.swap(0, Ordering::SeqCst);
-                if signal != 0 {
+                if let Some(signal) = signal::take() {
                     let _ = attach_child.kill();
                     let _ = attach_child.wait();
                     children.kill_all();
-                    return Ok(exit_code_for_signal(signal));
+                    return Ok(signal::exit_code(signal));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -571,24 +631,56 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
     }
 }
 
-fn exit_code_for_signal(signal: i32) -> ExitCode {
-    match signal {
-        libc::SIGHUP => ExitCode::from(129),
-        libc::SIGINT => ExitCode::from(130),
-        libc::SIGTERM => ExitCode::from(143),
-        _ => ExitCode::FAILURE,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn run_checked_interrupts_on_signal() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
+        crate::signal::set_for_test(libc::SIGINT);
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        assert!(matches!(
+            run_checked(command),
+            Err(RunnerError::Interrupted(libc::SIGINT))
+        ));
     }
-}
 
-extern "C" fn handle_signal(signal: libc::c_int) {
-    SIGNAL_FLAG.store(signal, Ordering::SeqCst);
-}
+    #[test]
+    fn workspace_path_falls_back_to_current_dir_when_pwd_is_stale() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("PWD", "/definitely/not/a/real/directory");
+        assert_eq!(workspace_path(), std::env::current_dir().unwrap());
+    }
 
-fn install_signal_handlers() {
-    let handler: extern "C" fn(libc::c_int) = handle_signal;
-    unsafe {
-        libc::signal(libc::SIGINT, handler as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, handler as libc::sighandler_t);
+    #[test]
+    fn workspace_path_uses_pwd_when_it_names_the_current_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_var("PWD", &cwd);
+        assert_eq!(workspace_path(), cwd);
+    }
+
+    #[test]
+    fn workspace_path_preserves_a_symlinked_pwd() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let link = std::env::temp_dir().join(format!(
+            "aegis-pwd-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::os::unix::fs::symlink(&cwd, &link).unwrap();
+        std::env::set_var("PWD", &link);
+
+        assert_eq!(workspace_path(), link);
+
+        let _ = std::fs::remove_file(&link);
     }
 }

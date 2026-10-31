@@ -1,5 +1,6 @@
 //! Host SSH key management.
 
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -90,14 +91,11 @@ fn write_pub_atomic(path: &Path, derived: &str) -> Result<(), SshKeyError> {
 }
 
 fn create_temp_dir(parent: &Path) -> Result<PathBuf, SshKeyError> {
-    let dir = parent.join(format!(
-        ".aegis-key-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let mut bytes = [0u8; 16];
+    let mut urandom = std::fs::File::open("/dev/urandom").map_err(SshKeyError::Io)?;
+    urandom.read_exact(&mut bytes).map_err(SshKeyError::Io)?;
+    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let dir = parent.join(format!(".aegis-key-{suffix}"));
     std::fs::create_dir(&dir).map_err(SshKeyError::Io)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
         .map_err(SshKeyError::Io)?;
@@ -285,5 +283,30 @@ mod tests {
             fields(&derived_public(&path)),
             fields(&std::fs::read_to_string(pub_of(&path)).unwrap())
         );
+    }
+
+    #[test]
+    fn temp_dir_name_is_a_random_hex_string() {
+        let parent = std::env::temp_dir().join(format!(
+            "aegis-key-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+
+        let dir = create_temp_dir(&parent).unwrap();
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let suffix = name.strip_prefix(".aegis-key-").expect("temp dir prefix");
+        assert!(!suffix.is_empty());
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "temp dir suffix should be a random hex string, got {suffix:?}"
+        );
+
+        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir(&parent);
     }
 }
