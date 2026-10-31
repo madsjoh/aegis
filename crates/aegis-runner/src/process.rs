@@ -151,16 +151,19 @@ mod tests {
     fn spawn_logged_sets_stdin_to_null() {
         let dir = temp_dir("stdin-null");
         let log = dir.join("log");
-        let script = write_executable(
-            &dir,
-            "reader",
-            "#!/bin/sh\n[ \"$(readlink /proc/self/fd/0 2>/dev/null)\" = \"/dev/null\" ]\n",
-        );
-        let mut command = Command::new(script);
-        command.stdin(Stdio::piped());
+        let input = dir.join("input");
+        std::fs::write(&input, "hello\n").unwrap();
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "read -r _ && exit 1 || exit 0"]);
+        command.stdin(Stdio::from(std::fs::File::open(&input).unwrap()));
+
         let mut child = spawn_logged(command, &log).unwrap();
         let status = child.wait().unwrap();
-        assert!(status.success(), "spawn_logged must override the child stdin to /dev/null");
+        assert!(
+            status.success(),
+            "spawn_logged must override the child stdin to /dev/null"
+        );
     }
 
     #[test]
