@@ -469,9 +469,10 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 
     println!("Booting the guest...");
     let vm_command_path = format!("{vm_path}/bin/run-aegis-vm");
+    let mut image_lock: Option<FileLock> = None;
     if is_darwin() {
-        let _image_lock = FileLock::acquire_blocking(&p.image_lock_file)
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        image_lock = Some(FileLock::acquire_blocking(&p.image_lock_file)
+            .map_err(|e| RunnerError::Other(e.to_string()))?);
         store_cache::link_shared_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         let mut command = Command::new(&vm_command_path);
@@ -480,7 +481,6 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         let child = process::spawn_logged(command, &vm_log)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         children.vm = Some(child);
-        drop(_image_lock);
     } else {
         let mut command = Command::new(&vm_command_path);
         command.env(
@@ -510,6 +510,9 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             .map_err(guest_start_to_runner)?;
         store_cache::publish_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
+        // The lock must cover publication so two runners sharing one cache
+        // directory cannot race the rename and symlink of store images.
+        drop(image_lock.take());
     }
 
     let ssh_target = if is_darwin() {
