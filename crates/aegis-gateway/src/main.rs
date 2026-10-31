@@ -5,7 +5,6 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use aegis_core::ca::Authority;
-use aegis_core::catalog::catalog;
 use aegis_core::secrets::{decrypt, AgeSource};
 use aegis_core::token_table::{Selection, TokenTable};
 
@@ -20,6 +19,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Authorize Copilot on the host and save the OAuth token with SOPS.
+    LoginCopilot {
+        #[arg(long)]
+        secrets: PathBuf,
+        #[arg(long)]
+        age_key: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Ensure the certificate authority is present and write its certificate.
     EnsureCa {
         /// Directory that stores the CA key pair.
@@ -63,6 +71,40 @@ async fn main() -> Result<(), BoxError> {
     tracing_subscriber::fmt().init();
 
     match Cli::parse().command {
+        Command::LoginCopilot {
+            secrets,
+            age_key,
+            force,
+        } => {
+            let age = AgeSource::File(age_key);
+            let file = decrypt(&secrets, &age).map_err(BoxError::from_error)?;
+            let table = TokenTable::build(&file, &Selection::defaults(&file))
+                .map_err(BoxError::from_error)?;
+            if let Some(configuration) = table.copilot() {
+                if force
+                    || configuration
+                        .oauth_token
+                        .as_deref()
+                        .is_none_or(str::is_empty)
+                {
+                    let token = aegis_gateway::copilot::device_login()
+                        .await
+                        .map_err(BoxError::from_error)?;
+                    aegis_core::secrets::update_copilot_oauth(
+                        &secrets,
+                        &age,
+                        &configuration.credential,
+                        &token,
+                    )
+                    .map_err(BoxError::from_error)?;
+                    println!(
+                        "Saved encrypted Copilot authorization for {}.",
+                        configuration.credential
+                    );
+                }
+            }
+            Ok(())
+        }
         Command::EnsureCa { ca_dir, cert_out } => {
             let authority = Authority::load_or_create(&ca_dir).map_err(BoxError::from_error)?;
             std::fs::write(&cert_out, authority.ca_pem())?;
@@ -91,30 +133,8 @@ async fn main() -> Result<(), BoxError> {
             let file =
                 decrypt(&secrets, &AgeSource::File(age_key)).map_err(BoxError::from_error)?;
             let selection = Selection::defaults(&file);
-            let mut credentials: Vec<serde_json::Value> = Vec::new();
-            for (name, spec) in catalog() {
-                if name == "github" || name == "copilot" {
-                    continue;
-                }
-                let Some(credential_name) = selection.credentials.get(&name) else {
-                    continue;
-                };
-                let Some(credentials_map) = file.integrations.get(&name) else {
-                    continue;
-                };
-                let Some(credential) = credentials_map.get(credential_name) else {
-                    continue;
-                };
-                if credential.api_key.is_some() {
-                    credentials.push(serde_json::json!({
-                        "id": format!("cred_aegis_{}", name),
-                        "integrationID": name,
-                        "label": "API key",
-                        "active": true,
-                        "value": { "type": "key", "key": spec.placeholder },
-                    }));
-                }
-            }
+            let credentials = aegis_gateway::credentials::provision_credentials(&file, &selection)
+                .map_err(BoxError::from_error)?;
             let body = serde_json::to_string_pretty(&credentials).map_err(BoxError::from_error)?;
             std::fs::write(&out, body)?;
             Ok(())

@@ -30,6 +30,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tower-service",
