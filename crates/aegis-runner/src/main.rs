@@ -663,4 +663,24 @@ mod tests {
         std::env::set_var("PWD", &cwd);
         assert_eq!(workspace_path(), cwd);
     }
+
+    #[test]
+    fn workspace_path_preserves_a_symlinked_pwd() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let link = std::env::temp_dir().join(format!(
+            "aegis-pwd-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::os::unix::fs::symlink(&cwd, &link).unwrap();
+        std::env::set_var("PWD", &link);
+
+        assert_eq!(workspace_path(), link);
+
+        let _ = std::fs::remove_file(&link);
+    }
 }
