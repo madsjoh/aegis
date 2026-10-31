@@ -65,6 +65,9 @@ fn run_runner(env: &Environment, nix_dir: &Path) -> RunResult {
     cmd.env("XDG_CACHE_HOME", &env.cache);
     cmd.env("XDG_DATA_HOME", &env.data);
     cmd.env("XDG_STATE_HOME", &env.state);
+    for name in ["HOST_CONFIG", "HOST_STATE_DIR", "HOST_WORKSPACE"] {
+        cmd.env_remove(name);
+    }
     match &env.config_home {
         Some(path) => {
             cmd.env("XDG_CONFIG_HOME", path);
@@ -168,4 +171,56 @@ fn xdg_config_home_with_a_space_is_honored() {
         "got: {}",
         result.output
     );
+}
+
+#[test]
+fn darwin_vm_launch_receives_shared_directory_environment() {
+    if !option_env!("AEGIS_HOST_SYSTEM")
+        .unwrap_or("x86_64-linux")
+        .ends_with("-darwin")
+    {
+        return;
+    }
+
+    let configuration_home = temp_dir("launch").join("custom configuration");
+    let environment = new_environment(Some(configuration_home));
+    let capture = environment.home.join("launch-environment");
+    let nix_directory = fake_nix_dir(&capture);
+    let vm_directory = temp_dir("vm");
+    std::fs::create_dir_all(vm_directory.join("bin")).unwrap();
+    std::fs::write(
+        nix_directory.join("nix"),
+        format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", vm_directory.display()),
+    )
+    .unwrap();
+    let launcher = vm_directory.join("bin/run-aegis-vm");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$HOST_WORKSPACE\" \"$HOST_CONFIG\" \"$HOST_STATE_DIR\" > '{}'\nexit 1\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &launcher,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    let result = run_runner(&environment, &nix_directory);
+
+    assert_eq!(result.status, 1);
+    let actual = std::fs::read_to_string(&capture).unwrap_or_else(|error| {
+        panic!("VM launch did not capture its environment: {error}; {}", result.output)
+    });
+    let values: Vec<_> = actual.lines().collect();
+    assert_eq!(values.len(), 3);
+    assert_eq!(
+        values[0],
+        environment.workspace.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(values[1], environment.config_dir().to_str().unwrap());
+    assert!(Path::new(values[2]).starts_with(environment.state.join("aegis")));
+    assert!(Path::new(values[2]).join("run/gitconfig/.gitconfig").is_file());
 }

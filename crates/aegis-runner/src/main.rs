@@ -496,6 +496,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         store_cache::link_shared_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         let mut command = Command::new(&vm_command_path);
+        apply_env(&mut command, &build_env);
         command.env("VZVM_STATE_DIR", &p.state_dir);
         command.args(forwarded);
         let child = process::spawn_logged(command, &vm_log)
@@ -503,6 +504,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         children.vm = Some(child);
     } else {
         let mut command = Command::new(&vm_command_path);
+        apply_env(&mut command, &build_env);
         command.env(
             "QEMU_KERNEL_PARAMS",
             format!(
