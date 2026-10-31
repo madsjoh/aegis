@@ -100,6 +100,8 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn base() -> BaseDirs {
         BaseDirs {
             config: "/tmp/cfg".into(),
@@ -168,8 +170,7 @@ mod tests {
 
     #[test]
     fn base_dirs_honor_xdg_overrides() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
 
         std::env::set_var("HOME", "/tmp/home");
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/with space/config");
@@ -186,8 +187,7 @@ mod tests {
 
     #[test]
     fn base_dirs_fall_back_to_home() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
 
         std::env::set_var("HOME", "/tmp/home");
         std::env::remove_var("XDG_CONFIG_HOME");
