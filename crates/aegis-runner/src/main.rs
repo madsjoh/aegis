@@ -272,6 +272,18 @@ fn socket_exists(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn dump_virtiofsd_logs(run_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("virtiofsd-") && name.ends_with(".log") {
+                process::dump_log(&entry.path());
+            }
+        }
+    }
+}
+
 fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
     let base = paths::base_dirs();
     let workspace = workspace_path();
@@ -424,6 +436,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             }
             for child in &mut children.virtiofsd {
                 if child.try_wait().map_err(|e| RunnerError::Other(e.to_string()))?.is_some() {
+                    dump_virtiofsd_logs(&p.run_dir);
                     return Err(RunnerError::Other(
                         "A virtiofs daemon exited before becoming ready.".to_string(),
                     ));
@@ -432,6 +445,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             std::thread::sleep(Duration::from_millis(200));
         }
         if !ready {
+            dump_virtiofsd_logs(&p.run_dir);
             return Err(RunnerError::Other(
                 "Timed out waiting for the virtiofs daemons.".to_string(),
             ));

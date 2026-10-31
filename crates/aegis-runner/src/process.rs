@@ -54,12 +54,14 @@ pub fn wait_for_log(
             return Err(ProcessError::Interrupted(signal));
         }
         if child.try_wait().map_err(ProcessError::Probe)?.is_some() {
+            dump_log(log);
             return Err(ProcessError::Exited);
         }
         if log_contains(log, needle)? {
             return Ok(());
         }
         if start.elapsed() >= timeout {
+            dump_log(log);
             return Err(ProcessError::Timeout);
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -120,6 +122,17 @@ fn log_contains(log: &Path, needle: &str) -> Result<bool, ProcessError> {
         Ok(content) => Ok(content.contains(needle)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(ProcessError::ReadLog(error)),
+    }
+}
+
+fn read_log(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// Write the contents of `log` to stderr, ignoring a missing or unreadable file.
+pub fn dump_log(path: &Path) {
+    if let Some(content) = read_log(path) {
+        eprint!("{content}");
     }
 }
 
@@ -290,5 +303,19 @@ mod tests {
             matches!(result, Err(ProcessError::Interrupted(libc::SIGINT))),
             "got: {result:?}"
         );
+    }
+
+    #[test]
+    fn read_log_returns_none_when_missing() {
+        let dir = temp_dir("read-missing");
+        assert_eq!(read_log(&dir.join("nope.log")), None);
+    }
+
+    #[test]
+    fn read_log_returns_the_contents() {
+        let dir = temp_dir("read-contents");
+        let log = dir.join("vm.log");
+        std::fs::write(&log, "boot failed\n").unwrap();
+        assert_eq!(read_log(&log), Some("boot failed\n".to_string()));
     }
 }

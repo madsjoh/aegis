@@ -58,6 +58,7 @@ pub fn wait_for_guest_start(child: &mut Child, log: &Path) -> Result<(), GuestSt
             return Err(GuestStartError::Interrupted(signal));
         }
         if child.try_wait().map_err(GuestStartError::Probe)?.is_some() {
+            crate::process::dump_log(log);
             return Err(GuestStartError::VmExited);
         }
         if log_has_marker(log) {
