@@ -90,7 +90,13 @@ fn workspace_path() -> PathBuf {
     if let Some(pwd) = std::env::var_os("PWD") {
         let path = PathBuf::from(pwd);
         if path.is_absolute() {
-            return path;
+            let names_current_dir = match (path.canonicalize(), std::env::current_dir()) {
+                (Ok(canonical), Ok(cwd)) => canonical == cwd,
+                _ => false,
+            };
+            if names_current_dir {
+                return path;
+            }
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -629,6 +635,8 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn run_checked_interrupts_on_signal() {
         let _guard = crate::signal::TEST_LOCK.lock().unwrap();
@@ -639,5 +647,20 @@ mod tests {
             run_checked(command),
             Err(RunnerError::Interrupted(libc::SIGINT))
         ));
+    }
+
+    #[test]
+    fn workspace_path_falls_back_to_current_dir_when_pwd_is_stale() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("PWD", "/definitely/not/a/real/directory");
+        assert_eq!(workspace_path(), std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn workspace_path_uses_pwd_when_it_names_the_current_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_var("PWD", &cwd);
+        assert_eq!(workspace_path(), cwd);
     }
 }
