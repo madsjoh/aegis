@@ -349,6 +349,14 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 
         let mut command = Command::new(&gateway_bin);
         command
+            .args(["login-copilot", "--secrets"])
+            .arg(&secrets_file)
+            .arg("--age-key")
+            .arg(&age_key_file);
+        run_checked(command)?;
+
+        let mut command = Command::new(&gateway_bin);
+        command
             .args(["provision-auth", "--secrets"])
             .arg(&secrets_file)
             .args(["--age-key"])

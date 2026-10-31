@@ -33,6 +33,7 @@ use aegis_core::ca::Authority;
 use aegis_core::policy::Decision;
 use aegis_core::token_table::{Rule, TokenTable};
 
+use crate::copilot::{CopilotError, CopilotTokens};
 use crate::rewrite::rewrite_header;
 
 /// The boxed error type the gateway uses across its public boundary.
@@ -117,7 +118,37 @@ pub async fn serve_with_extra_ca(
     extra_ca: Option<Arc<Authority>>,
 ) -> Result<(), BoxError> {
     let roots = Arc::new(upstream_root_store(extra_ca.as_deref()));
-    let clients = upstream_clients(roots);
+    let mut clients = upstream_clients(roots);
+    if let Some(configuration) = table.copilot() {
+        let configuration = configuration.clone();
+        let upstream = clients.clone();
+        clients.copilot = Some(Arc::new(CopilotTokens::new(Arc::new(move || {
+            let upstream = upstream.clone();
+            let configuration = configuration.clone();
+            Box::pin(async move {
+                let result = async {
+                    let token = configuration
+                        .oauth_token
+                        .as_deref()
+                        .ok_or(CopilotError::MissingOauth)?;
+                    let account = host_json_with_clients(
+                        &upstream,
+                        "GET",
+                        "https://api.github.com/copilot_internal/user",
+                        Some(token),
+                        None,
+                    )
+                    .await?;
+                    crate::copilot::CopilotSession::account(token, account)
+                }
+                .await;
+                if let Err(error) = &result {
+                    tracing::warn!(credential = %configuration.credential, "{error}");
+                }
+                result
+            })
+        }))));
+    }
     let acceptor = TlsAcceptor::from(mitm_server_config(Arc::clone(&authority)));
 
     let listener = TcpListener::bind(addr).await?;
@@ -207,8 +238,16 @@ async fn handle_connect(
 
     let lowercase_host = host.to_ascii_lowercase();
 
-    if let Some(rule) = table.matching_rule(&lowercase_host) {
-        let rule = rule.clone();
+    let matched = table.matching_rule(&lowercase_host).cloned().or_else(|| {
+        crate::copilot::is_copilot_host(&lowercase_host).then(|| Rule {
+            hosts: vec![lowercase_host.clone()],
+            auth_header: "authorization".to_string(),
+            placeholder: crate::copilot::PLACEHOLDER.to_string(),
+            secret: String::new(),
+            policy: None,
+        })
+    });
+    if let Some(rule) = matched {
         let on_upgrade = hyper::upgrade::on(&mut req);
         tokio::spawn(async move {
             match on_upgrade.await {
@@ -263,7 +302,15 @@ async fn mitm(
         let rule = rule.clone();
         let target = target.clone();
         let clients = clients.clone();
-        async move { handle_inner_request(req, rule, target, clients).await }
+        async move {
+            handle_inner_request(
+                req.map(|body: Incoming| body.map_err(into_box).boxed()),
+                rule,
+                target,
+                clients,
+            )
+            .await
+        }
     });
 
     auto::Builder::new(TokioExecutor::new())
@@ -275,11 +322,66 @@ async fn mitm(
 
 /// Handle one decrypted request from the client, rewriting and enforcing policy.
 async fn handle_inner_request(
-    mut req: Request<Incoming>,
+    mut req: Request<BoxBody>,
     rule: Rule,
     target: String,
     clients: UpstreamClients,
 ) -> Result<Response<BoxBody>, BoxError> {
+    let host = authority_host(&target)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let path = req.uri().path();
+    if (host == "api.github.com" || host.ends_with(".github.com"))
+        && (path == "/copilot_internal" || path.starts_with("/copilot_internal/"))
+    {
+        return Ok(forbidden());
+    }
+    if crate::copilot::is_copilot_host(&host) {
+        let authorization = req
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        let placeholder = authorization.is_some_and(|value| {
+            rewrite_header(value, crate::copilot::PLACEHOLDER, "validated").is_some()
+        });
+        if placeholder {
+            let Some(tokens) = &clients.copilot else {
+                return Ok(forbidden());
+            };
+            let session = match tokens.session().await {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!("Copilot authentication failed: {error}");
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(full_body(
+                            "Copilot authentication failed. Check the host gateway log.",
+                        ))
+                        .expect("valid response"));
+                }
+            };
+            set_header(
+                &mut req,
+                "authorization",
+                format!("Bearer {}", session.token),
+            )?;
+            if req
+                .headers()
+                .get("x-api-key")
+                .is_some_and(|value| value == crate::copilot::PLACEHOLDER)
+            {
+                req.headers_mut().remove("x-api-key");
+            }
+            let endpoint: Uri = session.endpoint.parse().map_err(BoxError::from_error)?;
+            let target = endpoint
+                .authority()
+                .expect("validated endpoint")
+                .as_str()
+                .to_string();
+            set_header(&mut req, "host", target.clone())?;
+            return forward_over_tls(req, target, clients).await;
+        }
+    }
     let Some(rewritten) = rewrite_request_header(&req, &rule) else {
         return forward_over_tls(req, target, clients).await;
     };
@@ -302,14 +404,14 @@ async fn handle_inner_request(
 
 /// Return the rewritten header value, or `None` when the header is absent or
 /// carries no placeholder.
-fn rewrite_request_header(req: &Request<Incoming>, rule: &Rule) -> Option<String> {
+fn rewrite_request_header(req: &Request<BoxBody>, rule: &Rule) -> Option<String> {
     let value = req.headers().get(rule.auth_header.as_str())?;
     let value = value.to_str().ok()?;
     rewrite_header(value, &rule.placeholder, &rule.secret)
 }
 
 /// Replace the value of `name` on `req` with `value`.
-fn set_header(req: &mut Request<Incoming>, name: &str, value: String) -> Result<(), BoxError> {
+fn set_header(req: &mut Request<BoxBody>, name: &str, value: String) -> Result<(), BoxError> {
     let name = HeaderName::from_bytes(name.as_bytes())?;
     let value = HeaderValue::from_str(&value)?;
     req.headers_mut().insert(name, value);
@@ -319,7 +421,7 @@ fn set_header(req: &mut Request<Incoming>, name: &str, value: String) -> Result<
 /// Forward a decrypted request upstream over TLS, selecting the upstream
 /// protocol from the request version so it matches the MITM leg protocol.
 async fn forward_over_tls(
-    req: Request<Incoming>,
+    req: Request<BoxBody>,
     target: String,
     clients: UpstreamClients,
 ) -> Result<Response<BoxBody>, BoxError> {
@@ -329,10 +431,7 @@ async fn forward_over_tls(
         http::Version::HTTP_2 => &clients.http2,
         _ => &clients.http1,
     };
-    let response = client
-        .request(req)
-        .await
-        .map_err(BoxError::from_error)?;
+    let response = client.request(req).await.map_err(BoxError::from_error)?;
     Ok(response.map(|body| body.map_err(into_box).boxed()))
 }
 
@@ -348,7 +447,7 @@ fn absolute_uri(authority: &str, uri: &Uri) -> Result<Uri, BoxError> {
 }
 
 /// The upstream HTTP client, which negotiates the protocol offered over ALPN.
-type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, Incoming>;
+type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, BoxBody>;
 
 /// The upstream clients, one per supported protocol version, so the upstream
 /// connection matches the request version.
@@ -356,6 +455,7 @@ type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, Inco
 struct UpstreamClients {
     http1: UpstreamClient,
     http2: UpstreamClient,
+    copilot: Option<Arc<CopilotTokens>>,
 }
 
 /// Build the HTTP/1.1 and HTTP/2 upstream clients sharing a root store.
@@ -363,7 +463,67 @@ fn upstream_clients(roots: Arc<rustls::RootCertStore>) -> UpstreamClients {
     UpstreamClients {
         http1: upstream_client(Arc::clone(&roots), &[b"http/1.1"]),
         http2: upstream_client(roots, &[b"h2"]),
+        copilot: None,
     }
+}
+
+pub async fn host_json(
+    method: &str,
+    endpoint: &str,
+    token: Option<&str>,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, CopilotError> {
+    let clients = upstream_clients(Arc::new(upstream_root_store(None)));
+    host_json_with_clients(&clients, method, endpoint, token, payload).await
+}
+
+async fn host_json_with_clients(
+    clients: &UpstreamClients,
+    method: &str,
+    endpoint: &str,
+    token: Option<&str>,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, CopilotError> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(endpoint)
+            .header("accept", "application/json")
+            .header("user-agent", "aegis/0.1.0")
+            .header("x-github-api-version", "2025-04-01");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let body = if let Some(payload) = payload {
+            request = request.header("content-type", "application/json");
+            Full::new(Bytes::from(
+                serde_json::to_vec(&payload).map_err(|_| CopilotError::InvalidResponse)?,
+            ))
+            .map_err(|never| match never {})
+            .boxed()
+        } else {
+            empty_body()
+        };
+        let request = request
+            .body(body)
+            .map_err(|_| CopilotError::InvalidResponse)?;
+        let response = clients
+            .http1
+            .request(request)
+            .await
+            .map_err(|_| CopilotError::Transport)?;
+        if !response.status().is_success() {
+            return Err(CopilotError::Status(response.status().as_u16()));
+        }
+        let bytes = http_body_util::Limited::new(response.into_body(), 64 * 1024)
+            .collect()
+            .await
+            .map_err(|_| CopilotError::InvalidResponse)?
+            .to_bytes();
+        serde_json::from_slice(&bytes).map_err(|_| CopilotError::InvalidResponse)
+    })
+    .await
+    .map_err(|_| CopilotError::Transport)?
 }
 
 /// Build one upstream client offering the given ALPN protocols.
@@ -378,11 +538,17 @@ fn upstream_client(roots: Arc<rustls::RootCertStore>, alpn: &[&[u8]]) -> Upstrea
 #[derive(Clone)]
 struct UpstreamConnector {
     tls: Arc<TlsConnector>,
+    #[cfg(test)]
+    address: Option<SocketAddr>,
 }
 
 impl UpstreamConnector {
     fn new(tls: Arc<TlsConnector>) -> Self {
-        Self { tls }
+        Self {
+            tls,
+            #[cfg(test)]
+            address: None,
+        }
     }
 }
 
@@ -397,13 +563,17 @@ impl Service<Uri> for UpstreamConnector {
 
     fn call(&mut self, dst: Uri) -> Self::Future {
         let tls = Arc::clone(&self.tls);
+        #[cfg(test)]
+        let address = self.address;
         Box::pin(async move {
             let authority = dst.authority().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "uri has no authority")
             })?;
-            let target = authority.as_str().to_string();
+            let target = upstream_target(&dst)?;
             let host = authority.host().to_string();
 
+            #[cfg(test)]
+            let target = address.map(|address| address.to_string()).unwrap_or(target);
             let stream = TcpStream::connect(&target).await?;
             let server_name = server_name(&host)?;
             let tls_stream = tls.connect(server_name, stream).await?;
@@ -415,6 +585,17 @@ impl Service<Uri> for UpstreamConnector {
             })
         })
     }
+}
+
+fn upstream_target(uri: &Uri) -> Result<String, std::io::Error> {
+    let authority = uri
+        .authority()
+        .ok_or_else(|| std::io::Error::other("URI has no authority"))?;
+    Ok(if authority.port_u16().is_some() {
+        authority.as_str().to_string()
+    } else {
+        format!("{}:443", authority.as_str())
+    })
 }
 
 /// The upstream transport, which reports the negotiated protocol to the client.
@@ -662,6 +843,182 @@ mod tests {
 
     const PLACEHOLDER: &str = "placeholder-secret";
     const SECRET: &str = "real-token";
+
+    #[tokio::test]
+    async fn copilot_routes_oauth_and_preserves_streamed_requests() {
+        let directory = temp_dir("copilot");
+        let authority = Authority::load_or_create(&directory).unwrap();
+        let certified = authority
+            .leaf_certified_key("api.enterprise.githubcopilot.com")
+            .unwrap();
+        let configuration = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(FixedResolver { certified }));
+        let acceptor = TlsAcceptor::from(Arc::new(configuration));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, mut received) = tokio::sync::mpsc::channel(8);
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let acceptor = acceptor.clone();
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let stream = acceptor.accept(stream).await.unwrap();
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let sender = sender.clone();
+                        async move {
+                            let (parts, body) = request.into_parts();
+                            let bytes = body.collect().await.unwrap().to_bytes();
+                            sender
+                                .send((parts.uri, parts.headers, bytes))
+                                .await
+                                .unwrap();
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .header("content-type", "text/event-stream")
+                                    .body(Full::new(Bytes::from_static(
+                                        b"data: public-response\n\n",
+                                    )))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let roots = Arc::new(upstream_root_store(Some(&authority)));
+        let mut connector =
+            UpstreamConnector::new(upstream_tls_connector(roots.clone(), &[b"http/1.1"]));
+        connector.address = Some(address);
+        let client =
+            hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector);
+        let tokens = Arc::new(CopilotTokens::new(Arc::new(|| {
+            Box::pin(async {
+                crate::copilot::CopilotSession::account(
+                    "oauth-host-sentinel",
+                    serde_json::json!({"chat_enabled":true,
+                        "endpoints":{"api":"https://api.enterprise.githubcopilot.com"}}),
+                )
+            })
+        })));
+        let clients = UpstreamClients {
+            http1: client.clone(),
+            http2: client,
+            copilot: Some(tokens),
+        };
+        for path in ["/models", "/chat/completions", "/responses", "/v1/messages"] {
+            let rule = Rule {
+                hosts: vec!["api.githubcopilot.com".into()],
+                auth_header: "authorization".into(),
+                placeholder: crate::copilot::PLACEHOLDER.into(),
+                secret: String::new(),
+                policy: None,
+            };
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("{path}?test=1"))
+                .header("authorization", "Bearer copilot-aegis-placeholder")
+                .header("x-api-key", "copilot-aegis-placeholder")
+                .header("x-interaction-type", "conversation-agent")
+                .body(full_body("request-body"))
+                .unwrap();
+            let response = handle_inner_request(
+                request,
+                rule,
+                "api.githubcopilot.com:443".into(),
+                clients.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "data: public-response\n\n"
+            );
+            let (uri, headers, body) = received.recv().await.unwrap();
+            assert_eq!(
+                uri.path_and_query().unwrap().as_str(),
+                format!("{path}?test=1")
+            );
+            assert_eq!(headers["authorization"], "Bearer oauth-host-sentinel");
+            assert_eq!(headers["host"], "api.enterprise.githubcopilot.com");
+            assert_eq!(headers["x-interaction-type"], "conversation-agent");
+            assert!(!headers.contains_key("x-api-key"));
+            assert_eq!(body, "request-body");
+        }
+        server.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn host_https_requests_supply_default_port() {
+        assert_eq!(
+            upstream_target(
+                &"https://api.github.com/copilot_internal/user"
+                    .parse()
+                    .unwrap()
+            )
+            .unwrap(),
+            "api.github.com:443"
+        );
+        assert_eq!(
+            upstream_target(&"https://localhost:8443/models".parse().unwrap()).unwrap(),
+            "localhost:8443"
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_token_endpoint_is_denied_without_placeholder() {
+        let clients = upstream_clients(Arc::new(rustls::RootCertStore::empty()));
+        for authorization in [
+            None,
+            Some("Bearer unrelated"),
+            Some("Bearer placeholder-secret"),
+        ] {
+            let mut request = Request::builder().uri("/copilot_internal/v2/token?client=test");
+            if let Some(value) = authorization {
+                request = request.header("authorization", value);
+            }
+            let response = handle_inner_request(
+                request.body(empty_body()).unwrap(),
+                rule_for("api.github.com"),
+                "api.github.com:443".to_string(),
+                clients.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_copilot_does_not_forward_placeholder() {
+        let clients = upstream_clients(Arc::new(rustls::RootCertStore::empty()));
+        let mut rule = rule_for("api.githubcopilot.com");
+        rule.policy = None;
+        let request = Request::builder()
+            .uri("/models")
+            .header("authorization", "Bearer copilot-aegis-placeholder")
+            .body(empty_body())
+            .unwrap();
+        let response = handle_inner_request(
+            request,
+            rule,
+            "api.githubcopilot.com:443".to_string(),
+            clients,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

@@ -4,7 +4,10 @@
 //! typed [`SecretsFile`]. The decrypted plaintext is never written to disk.
 
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::process::{Command, ExitStatus};
 
 use serde::Deserialize;
@@ -33,7 +36,9 @@ pub struct Credential {
     #[serde(default)]
     pub repositories: Vec<RepoRule>,
     #[serde(default)]
-    pub enabled: Option<bool>,
+    pub copilot: bool,
+    #[serde(default)]
+    pub copilot_oauth_token: Option<String>,
 }
 
 impl std::fmt::Debug for Credential {
@@ -42,6 +47,10 @@ impl std::fmt::Debug for Credential {
             .debug_struct("Credential")
             .field("pat", &self.pat.as_ref().map(|_| "[REDACTED]"))
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "copilot_oauth_token",
+                &self.copilot_oauth_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("repositories", &self.repositories)
             .finish()
     }
@@ -72,6 +81,8 @@ pub enum AgeSource {
 /// An error that can occur while decrypting a secrets file.
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
+    #[error("failed to update encrypted secrets: {0}")]
+    Update(#[source] std::io::Error),
     #[error("failed to read age key file: {0}")]
     ReadAgeKey(#[source] std::io::Error),
     #[error("failed to run sops: {0}")]
@@ -88,11 +99,7 @@ pub enum SecretsError {
     AgeKeyNotUtf8,
 }
 
-/// Decrypt a sops encrypted secrets file and parse it into a [`SecretsFile`].
-///
-/// The age key is passed to the `sops` subprocess through the `SOPS_AGE_KEY`
-/// environment variable and never printed. The plaintext lives only in memory.
-pub fn decrypt(secrets_path: &Path, age: &AgeSource) -> Result<SecretsFile, SecretsError> {
+fn age_key(age: &AgeSource) -> Result<String, SecretsError> {
     let age_key = match age {
         AgeSource::File(path) => std::fs::read_to_string(path).map_err(SecretsError::ReadAgeKey)?,
         AgeSource::Keychain { service, account } => {
@@ -112,6 +119,19 @@ pub fn decrypt(secrets_path: &Path, age: &AgeSource) -> Result<SecretsFile, Secr
                 .to_string()
         }
     };
+    Ok(age_key)
+}
+
+/// Decrypt secrets in memory, passing the age key through `SOPS_AGE_KEY`.
+pub fn decrypt(secrets_path: &Path, age: &AgeSource) -> Result<SecretsFile, SecretsError> {
+    serde_json::from_value(decrypt_document(secrets_path, age)?).map_err(SecretsError::Parse)
+}
+
+fn decrypt_document(
+    secrets_path: &Path,
+    age: &AgeSource,
+) -> Result<serde_json::Value, SecretsError> {
+    let age_key = age_key(age)?;
 
     let output = Command::new("sops")
         .args(["--decrypt", "--input-type", "yaml", "--output-type", "json"])
@@ -128,6 +148,94 @@ pub fn decrypt(secrets_path: &Path, age: &AgeSource) -> Result<SecretsFile, Secr
     }
 
     serde_json::from_slice(&output.stdout).map_err(SecretsError::Parse)
+}
+
+/// Update the OAuth token without writing decrypted secrets to disk.
+pub fn update_copilot_oauth(
+    path: &Path,
+    age: &AgeSource,
+    credential: &str,
+    token: &str,
+) -> Result<(), SecretsError> {
+    let original = std::fs::read(path).map_err(SecretsError::Update)?;
+    let temporary = path.with_extension(format!(
+        "aegis-{}-{}.yaml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(SecretsError::Update)?;
+        file.write_all(&original).map_err(SecretsError::Update)?;
+        let index = format!(
+            "[\"github\"][{}][\"copilot_oauth_token\"]",
+            serde_json::to_string(credential).unwrap()
+        );
+        let mut child = Command::new("sops")
+            .args([
+                "set",
+                "--value-stdin",
+                "--input-type",
+                "yaml",
+                "--output-type",
+                "yaml",
+            ])
+            .arg(&temporary)
+            .arg(index)
+            .env("SOPS_AGE_KEY", age_key(age)?)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(SecretsError::RunSops)?;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(token).unwrap())
+            .map_err(SecretsError::Update)?;
+        let output = child.wait_with_output().map_err(SecretsError::RunSops)?;
+        if !output.status.success() {
+            return Err(SecretsError::Sops {
+                status: output.status,
+                stderr: "SOPS could not save the OAuth credential".to_string(),
+            });
+        }
+        let mut expected = decrypt_document(path, age)?;
+        let credential_document = expected
+            .get_mut("github")
+            .and_then(|credentials| credentials.get_mut(credential))
+            .and_then(|credential| credential.as_object_mut())
+            .ok_or_else(|| {
+                SecretsError::Update(std::io::Error::other("GitHub credential not found"))
+            })?;
+        credential_document.insert(
+            "copilot_oauth_token".to_string(),
+            serde_json::Value::String(token.to_string()),
+        );
+        let updated = decrypt_document(&temporary, age)?;
+        let ciphertext = std::fs::read_to_string(&temporary).map_err(SecretsError::Update)?;
+        if updated != expected || token.is_empty() || ciphertext.contains(token) {
+            return Err(SecretsError::Update(std::io::Error::other(
+                "OAuth update verification failed",
+            )));
+        }
+        if std::fs::read(path).map_err(SecretsError::Update)? != original {
+            return Err(SecretsError::Update(std::io::Error::other(
+                "secrets changed during OAuth update; retry login",
+            )));
+        }
+        std::fs::rename(&temporary, path).map_err(SecretsError::Update)
+    })();
+    let _ = std::fs::remove_file(temporary);
+    result
 }
 
 #[cfg(test)]
@@ -181,6 +289,51 @@ mod tests {
     }
 
     #[test]
+    fn copilot_defaults_to_false() {
+        let credential: Credential = serde_json::from_str(r#"{"pat":"sentinel"}"#).unwrap();
+        assert!(!credential.copilot);
+    }
+
+    #[test]
+    fn copilot_is_enabled_on_github_credential() {
+        let credential: Credential =
+            serde_json::from_str(r#"{"pat":"sentinel","copilot":true}"#).unwrap();
+        assert!(credential.copilot);
+    }
+
+    #[test]
+    fn oauth_update_preserves_existing_secrets_and_ciphertext() {
+        let directory =
+            std::env::temp_dir().join(format!("aegis-sops-update-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("secrets.yaml");
+        std::fs::copy(fixture("secrets.yaml"), &path).unwrap();
+        let age = AgeSource::File(fixture("test-key.txt"));
+        let before = decrypt(&path, &age).unwrap();
+        update_copilot_oauth(&path, &age, "personal", "oauth-sentinel").unwrap();
+        let after = decrypt(&path, &age).unwrap();
+        assert_eq!(
+            after.integrations["github"]["personal"]
+                .copilot_oauth_token
+                .as_deref(),
+            Some("oauth-sentinel")
+        );
+        assert_eq!(
+            after.integrations["github"]["personal"].pat,
+            before.integrations["github"]["personal"].pat
+        );
+        assert_eq!(
+            after.integrations["github"]["personal"].repositories,
+            before.integrations["github"]["personal"].repositories
+        );
+        assert_eq!(after.integrations["openai"], before.integrations["openai"]);
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("oauth-sentinel"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn permission_deserializes_lowercase() {
         let read: Permission = serde_json::from_str("\"read\"").expect("read parses");
         let write: Permission = serde_json::from_str("\"write\"").expect("write parses");
@@ -194,7 +347,8 @@ mod tests {
             pat: Some("super_secret_pat".to_string()),
             api_key: Some("super_secret_api_key".to_string()),
             repositories: vec![],
-            enabled: None,
+            copilot: false,
+            copilot_oauth_token: Some("super_secret_oauth".to_string()),
         };
         let secrets = SecretsFile {
             integrations: BTreeMap::from([(
@@ -206,10 +360,12 @@ mod tests {
         assert!(credential_debug.contains("[REDACTED]"));
         assert!(!credential_debug.contains("super_secret_pat"));
         assert!(!credential_debug.contains("super_secret_api_key"));
+        assert!(!credential_debug.contains("super_secret_oauth"));
 
         let secrets_debug = format!("{secrets:?}");
         assert!(secrets_debug.contains("[REDACTED]"));
         assert!(!secrets_debug.contains("super_secret_pat"));
         assert!(!secrets_debug.contains("super_secret_api_key"));
+        assert!(!secrets_debug.contains("super_secret_oauth"));
     }
 }

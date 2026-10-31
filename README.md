@@ -257,9 +257,9 @@ the guest behaves as before.
 | Google    | `generativelanguage.googleapis.com` | `x-goog-api-key`  | `api_key`    |
 | DeepSeek  | `api.deepseek.com`                  | `authorization`   | `api_key`    |
 
-GitHub Copilot is not in the table because it uses short lived OAuth tokens
-minted from your GitHub token, so it has no secret of its own. It is enabled
-with a boolean instead, as shown in the example below.
+GitHub Copilot is enabled on the selected GitHub credential with `copilot: true`.
+Repository access uses its PAT. Copilot requires a separate GitHub OAuth token,
+which Aegis obtains through host device login and stores encrypted with SOPS.
 
 ### secrets.yaml
 
@@ -271,6 +271,7 @@ also configure the repositories and permissions the credential may use.
 github:
   personal:
     pat: ghp_xxxxxxxxxxxxxxxx
+    copilot: true
     repositories:
       - pattern: "madsjoh/aegis"
         permissions:
@@ -297,9 +298,6 @@ deepseek:
   default:
     api_key: sk-xxxxxxxx
 
-copilot:
-  default:
-    enabled: true
 ```
 
 GitHub permissions use the fine grained names with `read` or `write` values.
@@ -311,6 +309,37 @@ Requests outside any repository allow reads but block writes.
 The age key that decrypts `secrets.yaml` comes from macOS Keychain, the
 freedesktop Secret Service, or the default sops age key file at
 `~/.config/sops/age/keys.txt`.
+
+### Copilot Authorization
+
+The first launch with `copilot: true` displays a GitHub verification URL and
+device code. Approve the login in your browser using an account with Copilot
+access. Aegis verifies that account's entitlement, then saves
+`copilot_oauth_token` encrypted under the selected GitHub credential. This works
+on macOS and Linux without a system keyring. Personal access tokens cannot
+authenticate Copilot API requests.
+
+When several GitHub credentials exist, Aegis selects the lexicographically first
+name. Only that credential's Copilot setting and OAuth token apply. Omit
+`copilot` or set it to `false` to disable gateway Copilot authentication.
+
+The gateway discovers the account's Copilot API endpoint and substitutes the
+OAuth token for OpenCode's placeholder during model discovery and inference.
+The decrypted OAuth token remains on the host. The guest cannot request tokens
+through GitHub's Copilot token endpoints. SOPS updates preserve other credentials
+and encryption recipients, and never write decrypted secrets to disk.
+
+To replace revoked authorization, run the host login command:
+
+```sh
+nix run .#aegis-gateway -- login-copilot \
+  --secrets "$HOME/.config/aegis/secrets.yaml" \
+  --age-key "$HOME/.config/sops/age/keys.txt" \
+  --force
+```
+
+For older secrets files, move `copilot.default.enabled` to `copilot` under the
+selected GitHub credential and remove the top level `copilot` section.
 
 ## Development
 

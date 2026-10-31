@@ -135,6 +135,29 @@ fn runner_resolves_and_shares_user_configuration() {
 }
 
 #[test]
+fn runner_authorizes_copilot_before_provisioning_credentials() {
+    let environment = new_environment(None);
+    std::fs::write(environment.config_dir().join("secrets.yaml"), "encrypted fixture\n").unwrap();
+    let capture = environment.home.join("gateway-commands");
+    let directory = fake_nix_dir(&capture);
+    std::fs::create_dir_all(directory.join("bin")).unwrap();
+    let gateway = directory.join("bin/aegis-gateway");
+    std::fs::write(&gateway, format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\nif [ \"$1\" = 'login-copilot' ]; then printf '%s\\n' 'Enter code: test-code' >&2; fi\n",
+        capture.display()
+    )).unwrap();
+    std::fs::set_permissions(&gateway, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(directory.join("nix"), format!(
+        "#!/bin/sh\ncase \"$2\" in *'#aegis-gateway') printf '%s\\n' '{}' ;; *) exit 1 ;; esac\n",
+        directory.display()
+    )).unwrap();
+    let result = run_runner(&environment, &directory);
+    assert_eq!(result.status, 1);
+    assert_eq!(std::fs::read_to_string(capture).unwrap(), "ensure-ca\nlogin-copilot\nprovision-auth\n");
+    assert!(result.output.contains("Enter code: test-code"));
+}
+
+#[test]
 fn unknown_command_reports_an_error() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_aegis"));
     cmd.arg("init");

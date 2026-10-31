@@ -53,34 +53,19 @@ pub struct CompiledRepoRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubPolicy {
     rules: Vec<CompiledRepoRule>,
-    allow_copilot: bool,
 }
 
 impl GithubPolicy {
     /// Build a policy from already compiled rules.
     pub fn new(rules: Vec<CompiledRepoRule>) -> GithubPolicy {
-        GithubPolicy {
-            rules,
-            allow_copilot: false,
-        }
-    }
-
-    /// Allow the Copilot token minting endpoint, gating it on an explicit
-    /// opt in rather than leaking it through the repository policy.
-    pub fn allow_copilot(mut self, enabled: bool) -> GithubPolicy {
-        self.allow_copilot = enabled;
-        self
+        GithubPolicy { rules }
     }
 
     /// Decide whether a request is allowed under this policy.
     pub fn evaluate(&self, method: &str, path_and_query: &str) -> Decision {
         let path = path_and_query.split('?').next().unwrap_or(path_and_query);
         if path == "/copilot_internal" || path.starts_with("/copilot_internal/") {
-            return if self.allow_copilot {
-                Decision::Allow
-            } else {
-                Decision::Deny
-            };
+            return Decision::Deny;
         }
 
         let request = match classify(method, path_and_query) {
@@ -222,9 +207,9 @@ fn classify(method: &str, path_and_query: &str) -> Classification {
             Some("pulls") => Scope::PullRequests,
             Some("issues") => Scope::Issues,
             Some("actions") => Scope::Actions,
-            Some(
-                "contents" | "commits" | "tags" | "releases" | "git" | "tarball" | "zipball",
-            ) => Scope::Contents,
+            Some("contents" | "commits" | "tags" | "releases" | "git" | "tarball" | "zipball") => {
+                Scope::Contents
+            }
             Some(_) => return Classification::Unrecognized,
         };
         return Classification::Repo(ClassifiedRequest {
@@ -450,12 +435,11 @@ mod tests {
     }
 
     #[test]
-    fn copilot_internal_is_allowed_when_enabled() {
-        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)])
-            .allow_copilot(true);
+    fn copilot_internal_with_query_is_denied() {
+        let policy = policy_with("org/repo", &[(Scope::Contents, Permission::Read)]);
         assert_eq!(
-            policy.evaluate("GET", "/copilot_internal/v2/token"),
-            Decision::Allow
+            policy.evaluate("GET", "/copilot_internal/v2/token?client=aegis"),
+            Decision::Deny
         );
     }
 }

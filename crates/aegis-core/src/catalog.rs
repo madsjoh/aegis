@@ -25,14 +25,6 @@ pub fn catalog() -> BTreeMap<String, IntegrationSpec> {
             },
         ),
         (
-            "copilot".to_string(),
-            IntegrationSpec {
-                hosts: vec!["api.githubcopilot.com".to_string()],
-                auth_header: "authorization",
-                placeholder: "copilot-aegis-placeholder",
-            },
-        ),
-        (
             "deepseek".to_string(),
             IntegrationSpec {
                 hosts: vec!["api.deepseek.com".to_string()],
@@ -84,10 +76,7 @@ mod tests {
         );
         assert_eq!(catalog()["anthropic"].auth_header, "x-api-key");
         assert_eq!(catalog()["google"].auth_header, "x-goog-api-key");
-        assert_eq!(
-            catalog()["google"].placeholder,
-            "AQ.aegis-placeholder"
-        );
+        assert_eq!(catalog()["google"].placeholder, "AQ.aegis-placeholder");
         assert_eq!(
             catalog()["google"].hosts,
             vec!["generativelanguage.googleapis.com".to_string()]

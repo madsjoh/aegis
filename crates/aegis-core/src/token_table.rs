@@ -36,6 +36,24 @@ impl std::fmt::Debug for Rule {
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenTable {
     rules: Vec<Rule>,
+    copilot: Option<CopilotConfiguration>,
+}
+
+/// The selected GitHub credential used for host Copilot authentication.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CopilotConfiguration {
+    pub credential: String,
+    pub oauth_token: Option<String>,
+}
+
+impl std::fmt::Debug for CopilotConfiguration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CopilotConfiguration")
+            .field("credential", &self.credential)
+            .field("oauth_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for TokenTable {
@@ -43,6 +61,7 @@ impl std::fmt::Debug for TokenTable {
         formatter
             .debug_struct("TokenTable")
             .field("rules", &self.rules)
+            .field("copilot", &self.copilot)
             .finish()
     }
 }
@@ -50,6 +69,8 @@ impl std::fmt::Debug for TokenTable {
 /// An error that can occur while building a token table.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    #[error("move copilot.default.enabled to copilot on the selected GitHub credential and remove the top level copilot section")]
+    LegacyCopilot,
     #[error("integration `{integration}` has no credential named `{credential}`")]
     MissingCredential {
         integration: String,
@@ -65,13 +86,19 @@ pub enum BuildError {
 impl TokenTable {
     /// Build a token table from an explicit rule list.
     pub fn new(rules: Vec<Rule>) -> TokenTable {
-        TokenTable { rules }
+        TokenTable {
+            rules,
+            copilot: None,
+        }
     }
 
     /// Build a token table from the catalog, secrets, and a credential selection.
     pub fn build(secrets: &SecretsFile, selection: &Selection) -> Result<TokenTable, BuildError> {
         let mut rules = Vec::new();
-        let mut allow_copilot = false;
+        let mut copilot = None;
+        if secrets.integrations.contains_key("copilot") {
+            return Err(BuildError::LegacyCopilot);
+        }
 
         for (integration, spec) in catalog() {
             let Some(credential_name) = selection.credentials.get(&integration) else {
@@ -87,11 +114,6 @@ impl TokenTable {
                 });
             };
 
-            if integration == "copilot" {
-                allow_copilot = credential.enabled.unwrap_or(false);
-                continue;
-            }
-
             let secret = credential
                 .pat
                 .clone()
@@ -102,10 +124,15 @@ impl TokenTable {
                 })?;
 
             let policy = if integration == "github" {
-                Some(
-                    GithubPolicy::new(compile_repositories(&credential.repositories))
-                        .allow_copilot(allow_copilot),
-                )
+                if credential.copilot {
+                    copilot = Some(CopilotConfiguration {
+                        credential: credential_name.clone(),
+                        oauth_token: credential.copilot_oauth_token.clone(),
+                    });
+                }
+                Some(GithubPolicy::new(compile_repositories(
+                    &credential.repositories,
+                )))
             } else {
                 None
             };
@@ -119,7 +146,11 @@ impl TokenTable {
             });
         }
 
-        Ok(TokenTable { rules })
+        Ok(TokenTable { rules, copilot })
+    }
+
+    pub fn copilot(&self) -> Option<&CopilotConfiguration> {
+        self.copilot.as_ref()
     }
 
     /// Return the first rule whose host pattern matches the request host.
@@ -214,7 +245,8 @@ mod tests {
             pat: pat.map(|value| value.to_string()),
             api_key: api_key.map(|value| value.to_string()),
             repositories,
-            enabled: None,
+            copilot: false,
+            copilot_oauth_token: None,
         }
     }
 
@@ -392,13 +424,54 @@ mod tests {
     }
 
     #[test]
-    fn copilot_enabled_allows_github_minting() {
-        use crate::policy::Decision;
+    fn copilot_uses_only_selected_github_credential() {
+        let mut enabled = credential(Some("selected-token"), None, vec![]);
+        enabled.copilot = true;
+        enabled.copilot_oauth_token = Some("selected-oauth".to_string());
+        let secrets = secrets_with(BTreeMap::from([(
+            "github".to_string(),
+            BTreeMap::from([
+                (
+                    "alpha".to_string(),
+                    credential(Some("other-token"), None, vec![]),
+                ),
+                ("zeta".to_string(), enabled),
+            ]),
+        )]));
+        let mut selection = Selection::defaults(&secrets);
+        assert!(TokenTable::build(&secrets, &selection)
+            .unwrap()
+            .copilot()
+            .is_none());
+        selection
+            .credentials
+            .insert("github".to_string(), "zeta".to_string());
+        let table = TokenTable::build(&secrets, &selection).unwrap();
+        let copilot = table.copilot().unwrap();
+        assert_eq!(copilot.credential, "zeta");
+        assert_eq!(copilot.oauth_token.as_deref(), Some("selected-oauth"));
+        assert!(!format!("{table:?}").contains("selected-token"));
+        assert_eq!(
+            table
+                .matching_rule("api.github.com")
+                .unwrap()
+                .policy
+                .as_ref()
+                .unwrap()
+                .evaluate("GET", "/copilot_internal/v2/token"),
+            crate::policy::Decision::Deny
+        );
+    }
 
+    #[test]
+    fn legacy_copilot_requires_migration() {
         let secrets = secrets_with(BTreeMap::from([
             (
                 "github".to_string(),
-                BTreeMap::from([("personal".to_string(), credential(Some("ghp"), None, vec![]))]),
+                BTreeMap::from([(
+                    "personal".to_string(),
+                    credential(Some("ghp"), None, vec![]),
+                )]),
             ),
             (
                 "copilot".to_string(),
@@ -408,19 +481,17 @@ mod tests {
                         pat: None,
                         api_key: None,
                         repositories: vec![],
-                        enabled: Some(true),
+                        copilot: false,
+                        copilot_oauth_token: None,
                     },
                 )]),
             ),
         ]));
         let selection = Selection::defaults(&secrets);
-        let table = TokenTable::build(&secrets, &selection).expect("build succeeds");
-        let github = table.matching_rule("api.github.com").expect("github rule");
-        let policy = github.policy.as_ref().expect("github policy");
-        assert_eq!(
-            policy.evaluate("GET", "/copilot_internal/v2/token"),
-            Decision::Allow
-        );
+        assert!(matches!(
+            TokenTable::build(&secrets, &selection),
+            Err(BuildError::LegacyCopilot)
+        ));
     }
 
     #[test]
@@ -429,7 +500,10 @@ mod tests {
 
         let secrets = secrets_with(BTreeMap::from([(
             "github".to_string(),
-            BTreeMap::from([("personal".to_string(), credential(Some("ghp"), None, vec![]))]),
+            BTreeMap::from([(
+                "personal".to_string(),
+                credential(Some("ghp"), None, vec![]),
+            )]),
         )]));
         let selection = Selection::defaults(&secrets);
         let table = TokenTable::build(&secrets, &selection).expect("build succeeds");
