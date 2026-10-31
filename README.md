@@ -314,9 +314,11 @@ freedesktop Secret Service, or the default sops age key file at
 
 ## Development
 
-The helpers are plain Bash and Nix modules under `helpers/` and `modules/`.
-The guest uses the latest OpenCode from the main `nixpkgs` input, the same
-revision as every other guest package.
+The runner is Rust under `crates/aegis-runner`, alongside the gateway under
+`crates/aegis-gateway` and its shared library `crates/aegis-core`. The guest
+configuration lives in the Nix modules under `modules/`. The guest uses the
+latest OpenCode from the main `nixpkgs` input, the same revision as every other
+guest package.
 
 Run the test suite with:
 
@@ -324,8 +326,8 @@ Run the test suite with:
 nix flake check
 ```
 
-The checks exercise the lock, configuration, store cache, and runner cache
-helpers plus the guest system mapping.
+The checks run the Rust unit and integration tests through `cargo-test`, verify
+the packaged runner binary, and exercise the guest system mapping.
 
 ## License
 
