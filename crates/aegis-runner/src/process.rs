@@ -13,6 +13,8 @@ pub enum ProcessError {
     Timeout,
     #[error("the VM exited before SSH became available")]
     VmExited,
+    #[error("interrupted by signal {0}")]
+    Interrupted(i32),
     #[error("failed to spawn the child: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("failed to probe the child: {0}")]
@@ -48,6 +50,9 @@ pub fn wait_for_log(
 ) -> Result<(), ProcessError> {
     let start = Instant::now();
     loop {
+        if let Some(signal) = crate::signal::take() {
+            return Err(ProcessError::Interrupted(signal));
+        }
         if child.try_wait().map_err(ProcessError::Probe)?.is_some() {
             return Err(ProcessError::Exited);
         }
@@ -70,6 +75,9 @@ pub fn wait_for_ssh(
 ) -> Result<(), ProcessError> {
     let mut failed_probes = 0u64;
     loop {
+        if let Some(signal) = crate::signal::take() {
+            return Err(ProcessError::Interrupted(signal));
+        }
         let mut command = Command::new("ssh");
         command
             .arg("-i")
@@ -242,5 +250,45 @@ mod tests {
         vm.wait().unwrap();
 
         assert!(matches!(result, Err(ProcessError::VmExited)), "got: {result:?}");
+    }
+
+    #[test]
+    fn wait_for_log_returns_interrupted_when_a_signal_is_pending() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
+
+        let dir = temp_dir("log-interrupted");
+        let log = dir.join("gateway.log");
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        crate::signal::set_for_test(libc::SIGINT);
+
+        assert!(matches!(
+            wait_for_log(&mut child, &log, "never", Duration::from_secs(5)),
+            Err(ProcessError::Interrupted(libc::SIGINT))
+        ));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn wait_for_ssh_returns_interrupted_when_a_signal_is_pending() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
+
+        let dir = temp_dir("ssh-interrupted");
+        let key = dir.join("key");
+        std::fs::write(&key, "unused").unwrap();
+        let log = dir.join("vm.log");
+        let mut vm = Command::new("sleep").arg("10").spawn().unwrap();
+        crate::signal::set_for_test(libc::SIGINT);
+
+        let result = wait_for_ssh(&mut vm, &["root@vsock/3"], &key, &log);
+
+        let _ = vm.kill();
+        let _ = vm.wait();
+
+        assert!(
+            matches!(result, Err(ProcessError::Interrupted(libc::SIGINT))),
+            "got: {result:?}"
+        );
     }
 }

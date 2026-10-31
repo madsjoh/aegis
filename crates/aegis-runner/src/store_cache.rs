@@ -13,6 +13,8 @@ pub enum GuestStartError {
     VmExited,
     #[error("failed to probe the VM: {0}")]
     Probe(#[source] std::io::Error),
+    #[error("interrupted by signal {0}")]
+    Interrupted(i32),
 }
 
 /// Symlink every regular `store-*.img` file in `cache` into `state`.
@@ -52,6 +54,9 @@ pub fn publish_store_images(state: &Path, cache: &Path) -> std::io::Result<()> {
 /// once the process with `pid` is gone.
 pub fn wait_for_guest_start(child: &mut Child, log: &Path) -> Result<(), GuestStartError> {
     loop {
+        if let Some(signal) = crate::signal::take() {
+            return Err(GuestStartError::Interrupted(signal));
+        }
         if child.try_wait().map_err(GuestStartError::Probe)?.is_some() {
             return Err(GuestStartError::VmExited);
         }
@@ -209,5 +214,22 @@ mod tests {
 
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn wait_for_guest_start_returns_interrupted_when_a_signal_is_pending() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
+
+        let log = temp_dir("interrupted").join("vm.log");
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        crate::signal::set_for_test(libc::SIGINT);
+
+        assert!(matches!(
+            wait_for_guest_start(&mut child, &log),
+            Err(GuestStartError::Interrupted(libc::SIGINT))
+        ));
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
