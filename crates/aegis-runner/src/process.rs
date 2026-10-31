@@ -187,6 +187,7 @@ mod tests {
 
     #[test]
     fn wait_for_log_returns_ok_when_the_needle_appears() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
         let dir = temp_dir("log-ok");
         let log = dir.join("gateway.log");
         let writer = write_executable(
@@ -204,6 +205,7 @@ mod tests {
 
     #[test]
     fn wait_for_log_fails_when_the_child_exits() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
         let dir = temp_dir("log-exited");
         let log = dir.join("gateway.log");
         let mut child = Command::new("true").spawn().unwrap();
@@ -217,6 +219,7 @@ mod tests {
 
     #[test]
     fn wait_for_ssh_returns_ok_when_the_probe_succeeds() {
+        let _signal_guard = crate::signal::TEST_LOCK.lock().unwrap();
         let _guard = PATH_LOCK.lock().unwrap();
 
         let dir = temp_dir("ssh-ok");
@@ -241,6 +244,7 @@ mod tests {
 
     #[test]
     fn wait_for_ssh_fails_when_the_vm_exits() {
+        let _signal_guard = crate::signal::TEST_LOCK.lock().unwrap();
         let _guard = PATH_LOCK.lock().unwrap();
 
         let dir = temp_dir("ssh-vm-exited");

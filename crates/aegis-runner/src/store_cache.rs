@@ -155,6 +155,7 @@ mod tests {
 
     #[test]
     fn wait_for_guest_start_ignores_partial_matches() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
         let log = temp_dir("partial").join("vm.log");
         let mut child = Command::new("sleep").arg("10").spawn().unwrap();
 
@@ -179,6 +180,7 @@ mod tests {
 
     #[test]
     fn wait_for_guest_start_fails_when_the_process_is_a_zombie() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
         let log = temp_dir("zombie").join("vm.log");
         let mut child = Command::new("true").spawn().unwrap();
         assert!(matches!(
@@ -189,6 +191,7 @@ mod tests {
 
     #[test]
     fn wait_for_guest_start_reports_vm_exited_even_after_the_marker() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
         let log = temp_dir("marker-dead").join("vm.log");
         let mut child = Command::new("sleep").arg("0.1").spawn().unwrap();
         std::fs::write(&log, "[vzvm] guest started\n").unwrap();
@@ -201,6 +204,7 @@ mod tests {
 
     #[test]
     fn wait_for_guest_start_returns_ok_on_the_exact_marker() {
+        let _guard = crate::signal::TEST_LOCK.lock().unwrap();
         let log = temp_dir("success").join("vm.log");
         let mut child = Command::new("sleep").arg("10").spawn().unwrap();
 
