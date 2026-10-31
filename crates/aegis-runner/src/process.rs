@@ -30,6 +30,7 @@ pub fn spawn_logged(mut command: Command, log: &Path) -> Result<Child, ProcessEr
         .map_err(ProcessError::ReadLog)?;
     let stderr = file.try_clone().map_err(ProcessError::ReadLog)?;
     let child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(stderr))
         .spawn()
@@ -144,6 +145,22 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn spawn_logged_sets_stdin_to_null() {
+        let dir = temp_dir("stdin-null");
+        let log = dir.join("log");
+        let script = write_executable(
+            &dir,
+            "reader",
+            "#!/bin/sh\n[ \"$(readlink /proc/self/fd/0 2>/dev/null)\" = \"/dev/null\" ]\n",
+        );
+        let mut command = Command::new(script);
+        command.stdin(Stdio::piped());
+        let mut child = spawn_logged(command, &log).unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "spawn_logged must override the child stdin to /dev/null");
     }
 
     #[test]

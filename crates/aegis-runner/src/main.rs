@@ -116,12 +116,17 @@ fn apply_env(command: &mut Command, env: &[(String, String)]) {
 }
 
 fn run_checked(mut command: Command) -> Result<std::process::Output, RunnerError> {
-    let output = command
-        .output()
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| RunnerError::Other(error.to_string()))?;
+    let output = child
+        .wait_with_output()
         .map_err(|error| RunnerError::Other(error.to_string()))?;
     if !output.status.success() {
         return Err(RunnerError::Command {
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            message: String::new(),
             code: output.status.code().unwrap_or(1),
         });
     }
@@ -136,7 +141,7 @@ fn nix_build(target: &str, env: &[(String, String)]) -> Result<String, RunnerErr
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn reg_info_basename() -> Result<String, RunnerError> {
+fn reg_info_basename(env: &[(String, String)]) -> Result<String, RunnerError> {
     let expression = format!(
         "let flake = builtins.getFlake \"{FLAKE_REF}\"; \
          pkgs = flake.inputs.nixpkgs.legacyPackages.{HOST_SYSTEM}; \
@@ -146,6 +151,7 @@ fn reg_info_basename() -> Result<String, RunnerError> {
     );
     let mut command = Command::new("nix");
     command.args(["eval", "--raw", "--impure", "--expr", &expression]);
+    apply_env(&mut command, env);
     let output = run_checked(command)?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -334,7 +340,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
     let reg_info = if is_darwin() {
         None
     } else {
-        Some(reg_info_basename()?)
+        Some(reg_info_basename(&build_env)?)
     };
 
     let mut children = Children::new();
@@ -408,16 +414,16 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             .arg(&secrets_file)
             .args(["--age-key"])
             .arg(&age_key_file);
-        let mut child = process::spawn_logged(command, &gateway_log)
+        let child = process::spawn_logged(command, &gateway_log)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
+        children.gateway = Some(child);
         process::wait_for_log(
-            &mut child,
+            children.gateway.as_mut().unwrap(),
             &gateway_log,
             "listening on",
             SSH_WAIT_TIMEOUT,
         )
         .map_err(|e| RunnerError::Other(e.to_string()))?;
-        children.gateway = Some(child);
     }
 
     let vm_log = p.run_dir.join("vm.log");
@@ -515,11 +521,16 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
             .arg("-o")
             .arg("BatchMode=yes");
         command.args(&ssh_target);
-        let mut child = process::spawn_logged(command, &tunnel_log)
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
-        process::wait_for_log(&mut child, &tunnel_log, "remote forward success", SSH_WAIT_TIMEOUT)
+        let child = process::spawn_logged(command, &tunnel_log)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         children.tunnel = Some(child);
+        process::wait_for_log(
+            children.tunnel.as_mut().unwrap(),
+            &tunnel_log,
+            "remote forward success",
+            SSH_WAIT_TIMEOUT,
+        )
+        .map_err(|e| RunnerError::Other(e.to_string()))?;
     }
 
     let mut attach = Command::new("ssh");
