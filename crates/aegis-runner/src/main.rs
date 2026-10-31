@@ -468,7 +468,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
 
     if is_darwin() {
         let vm_child = children.vm.as_mut().expect("vm spawned");
-        store_cache::wait_for_guest_start(vm_child.id(), &vm_log)
+        store_cache::wait_for_guest_start(vm_child, &vm_log)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         store_cache::publish_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
