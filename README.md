@@ -50,6 +50,9 @@ hosts. The guest is always Linux, so a Darwin host builds a Linux guest and
 needs a Linux builder to do so, such as the nix-darwin `linux-builder` or a
 remote builder.
 
+See [Linux Builder Setup][linux-builder-setup] for NixOS, standard Nix on
+macOS, and Determinate Nix instructions.
+
 ## Usage
 
 Install the `aegis` command into your profile:
@@ -362,6 +365,7 @@ the packaged runner binary, and exercise the guest system mapping.
 
 [MIT][mit]
 
+[linux-builder-setup]: docs/linux-builders.md
 [metis]: https://github.com/madsjoh/metis
 [mit]: https://opensource.org/license/mit
 [nix]: https://nixos.org/
