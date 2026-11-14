@@ -79,12 +79,23 @@ impl GithubPolicy {
             Classification::Repo(request) => request,
         };
 
-        let Some(rule) = self.matching_rule(&request.owner, &request.repo) else {
+        self.evaluate_requirement(&request.owner, &request.repo, request.scope, request.access)
+    }
+
+    /// Decide whether a single repository requirement is allowed under this policy.
+    pub fn evaluate_requirement(
+        &self,
+        owner: &str,
+        repo: &str,
+        scope: Scope,
+        access: Access,
+    ) -> Decision {
+        let Some(rule) = self.matching_rule(owner, repo) else {
             return Decision::Deny;
         };
 
-        let permission = rule.permissions.get(&request.scope).copied().or_else(|| {
-            if request.scope == Scope::Metadata {
+        let permission = rule.permissions.get(&scope).copied().or_else(|| {
+            if scope == Scope::Metadata {
                 Some(Permission::Read)
             } else {
                 None
@@ -93,7 +104,7 @@ impl GithubPolicy {
 
         match permission {
             Some(Permission::Write) => Decision::Allow,
-            Some(Permission::Read) => match request.access {
+            Some(Permission::Read) => match access {
                 Access::Read => Decision::Allow,
                 Access::Write => Decision::Deny,
             },
@@ -156,7 +167,7 @@ fn specificity(pattern: &str) -> u8 {
 /// Whether a request reads or writes, derived from the HTTP method or the git
 /// smart HTTP service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Access {
+pub enum Access {
     Read,
     Write,
 }
@@ -421,6 +432,22 @@ mod tests {
         );
         assert_eq!(
             policy.evaluate("POST", "/repos/org/other/contents/x"),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn evaluate_requirement_honors_most_specific_rule() {
+        let policy = policy_with_rules(&[
+            ("org/*", &[(Scope::Contents, Permission::Read)]),
+            ("org/repo", &[(Scope::Contents, Permission::Write)]),
+        ]);
+        assert_eq!(
+            policy.evaluate_requirement("org", "repo", Scope::Contents, Access::Write),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate_requirement("org", "other", Scope::Contents, Access::Write),
             Decision::Deny
         );
     }
