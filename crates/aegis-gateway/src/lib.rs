@@ -5,5 +5,6 @@
 
 pub mod copilot;
 pub mod credentials;
+pub mod nodes;
 pub mod proxy;
 pub mod rewrite;

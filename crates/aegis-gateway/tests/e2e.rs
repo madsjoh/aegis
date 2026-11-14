@@ -66,9 +66,9 @@ impl ResolvesServerCert for FixedResolver {
 }
 
 /// Start a local HTTPS upstream whose certificate is signed by the gateway CA
-/// and whose response body echoes the request head.
-async fn start_upstream(authority: &Authority) -> SocketAddr {
-    let certified = authority.leaf_certified_key("localhost").expect("leaf");
+/// for `name` and whose response body echoes the request head.
+async fn start_upstream(authority: &Authority, name: &str) -> SocketAddr {
+    let certified = authority.leaf_certified_key(name).expect("leaf");
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -193,7 +193,7 @@ async fn placeholder_is_rewritten_and_read_only_push_is_denied() {
     let authority = Arc::new(Authority::load_or_create(&dir).expect("authority"));
     let ca_pem = authority.ca_pem();
 
-    let upstream_addr = start_upstream(&authority).await;
+    let upstream_addr = start_upstream(&authority, "localhost").await;
 
     let policy = GithubPolicy::new(vec![CompiledRepoRule {
         pattern: "org/repo".to_string(),
@@ -260,6 +260,100 @@ async fn placeholder_is_rewritten_and_read_only_push_is_denied() {
     );
     let mut tls = tls_to_proxy(proxy_addr, &target, &ca_pem).await;
     tls.write_all(push_request.as_bytes()).await.expect("write");
+    let mut head = Vec::new();
+    read_until_double_crlf(&mut tls, &mut head).await;
+    let text = String::from_utf8_lossy(&head);
+    assert!(text.starts_with("HTTP/1.1 403"), "response: {text}");
+}
+
+#[tokio::test]
+async fn graphql_named_repository_is_allowed_and_denied_by_policy() {
+    let dir = temp_dir("serve-graphql");
+    let authority = Arc::new(Authority::load_or_create(&dir).expect("authority"));
+    let ca_pem = authority.ca_pem();
+
+    let upstream_addr = start_upstream(&authority, "localhost").await;
+
+    let policy = GithubPolicy::new(vec![CompiledRepoRule {
+        pattern: "org/repo".to_string(),
+        permissions: BTreeMap::from([(Scope::Contents, Permission::Read)]),
+    }]);
+    let rule = Rule {
+        hosts: vec!["localhost".to_string()],
+        auth_header: "authorization".to_string(),
+        placeholder: PLACEHOLDER.to_string(),
+        secret: SECRET.to_string(),
+        policy: Some(policy),
+    };
+    let table = Arc::new(TokenTable::new(vec![rule]));
+
+    let proxy_addr = ephemeral_addr().await;
+    tokio::spawn(serve_with_extra_ca(
+        proxy_addr,
+        table,
+        Arc::clone(&authority),
+        Some(Arc::clone(&authority)),
+    ));
+
+    let target = format!("localhost:{}", upstream_addr.port());
+    let basic = format!(
+        "Basic {}",
+        STANDARD.encode(format!("x-access-token:{PLACEHOLDER}"))
+    );
+
+    // A GraphQL read naming the allowed repository must reach the upstream with
+    // the placeholder replaced by the real token.
+    let read_body = serde_json::to_string(&serde_json::json!({
+        "query": "query { repository(owner: \"org\", name: \"repo\") { object(expression: \"HEAD\") { oid } } }"
+    }))
+    .expect("serialize read query");
+    let read_request = format!(
+        "POST /graphql HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: {basic}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {read_body}",
+        read_body.len()
+    );
+    let mut tls = tls_to_proxy(proxy_addr, &target, &ca_pem).await;
+    tls.write_all(read_request.as_bytes()).await.expect("write");
+    let mut response = Vec::new();
+    tls.read_to_end(&mut response).await.expect("read");
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 200"), "response: {text}");
+    assert!(!text.contains(PLACEHOLDER), "response: {text}");
+
+    let encoded = text
+        .lines()
+        .find_map(|line| line.strip_prefix("authorization: "))
+        .and_then(|value| value.strip_prefix("Basic "))
+        .expect("authorization header echoed");
+    let credentials = String::from_utf8(STANDARD.decode(encoded.trim()).expect("basic decodes"))
+        .expect("basic is utf-8");
+    assert_eq!(credentials, format!("x-access-token:{SECRET}"));
+
+    // A GraphQL mutation naming the same repository must be denied because the
+    // policy grants only contents read.
+    let mutation_body = serde_json::to_string(&serde_json::json!({
+        "query": "mutation { createCommitOnBranch(input: { branch: { repositoryNameWithOwner: \"org/repo\", branchName: \"main\" }, message: { headline: \"x\" }, fileChanges: { additions: [] } }) { commit { oid } } }"
+    }))
+    .expect("serialize mutation");
+    let mutation_request = format!(
+        "POST /graphql HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: {basic}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {mutation_body}",
+        mutation_body.len()
+    );
+    let mut tls = tls_to_proxy(proxy_addr, &target, &ca_pem).await;
+    tls.write_all(mutation_request.as_bytes()).await.expect("write");
     let mut head = Vec::new();
     read_until_double_crlf(&mut tls, &mut head).await;
     let text = String::from_utf8_lossy(&head);
