@@ -96,7 +96,7 @@ pub fn classify(
                     &mut nested,
                 )?;
                 for selection in nested {
-                    let scope = query_scope(selection.name()).ok_or(GraphqlError::Unsupported)?;
+                    let scope = query_scope(selection.name());
                     requirements.push(Requirement {
                         access,
                         target: target.clone(),
@@ -307,13 +307,21 @@ fn find_key<'a>(value: Value<'a>, key: &str) -> Option<Value<'a>> {
     }
 }
 
-fn query_scope(name: &str) -> Option<Scope> {
+/// Map a field read within a repository selection to its permission scope.
+///
+/// The sensitive scopes are matched explicitly, and every other field defaults
+/// to [`Scope::Metadata`], which the policy always grants for reads. This keeps
+/// repository metadata reads working for real GraphQL clients while contents,
+/// issues, pull requests, and actions stay gated.
+fn query_scope(name: &str) -> Scope {
     match name {
-        "pullRequests" | "pullRequest" => Some(Scope::PullRequests),
-        "issues" | "issue" | "issueComments" => Some(Scope::Issues),
-        "object" | "defaultBranchRef" | "refs" | "content" => Some(Scope::Contents),
-        "id" | "name" | "nameWithOwner" | "description" | "__typename" => Some(Scope::Metadata),
-        _ => None,
+        "pullRequests" | "pullRequest" => Scope::PullRequests,
+        "issues" | "issue" | "issueComments" => Scope::Issues,
+        "object" | "defaultBranchRef" | "refs" | "content" | "ref" | "release" | "releases" => {
+            Scope::Contents
+        }
+        "workflowRun" | "workflowRuns" => Scope::Actions,
+        _ => Scope::Metadata,
     }
 }
 
@@ -445,14 +453,42 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_field_fails_closed() {
-        assert!(
+    fn unknown_repository_field_defaults_to_metadata() {
+        assert_eq!(
             classify(
                 "query { repository(owner: \"org\", name: \"repo\") { collaborators { nodes { id } } } }",
                 None,
                 None
             )
-            .is_err()
+            .unwrap(),
+            Operation::Scoped(vec![Requirement {
+                access: Access::Read,
+                target: RepositoryTarget::Named {
+                    owner: "org".into(),
+                    name: "repo".into()
+                },
+                scope: ScopeSpec::Fixed(Scope::Metadata)
+            }])
+        );
+    }
+
+    #[test]
+    fn repository_ref_is_contents_read() {
+        assert_eq!(
+            classify(
+                "query { repository(owner: \"org\", name: \"repo\") { ref(qualifiedName: \"main\") { name } } }",
+                None,
+                None
+            )
+            .unwrap(),
+            Operation::Scoped(vec![Requirement {
+                access: Access::Read,
+                target: RepositoryTarget::Named {
+                    owner: "org".into(),
+                    name: "repo".into()
+                },
+                scope: ScopeSpec::Fixed(Scope::Contents)
+            }])
         );
     }
 
