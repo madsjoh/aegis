@@ -388,10 +388,7 @@ async fn handle_inner_request(
         return forward_over_tls(req, target, clients).await;
     };
 
-    if req.method() == Method::POST
-        && (host == "api.github.com" || host.ends_with(".github.com"))
-        && path == "/graphql"
-    {
+    if req.method() == Method::POST && rule.policy.is_some() && path == "/graphql" {
         let body = std::mem::replace(req.body_mut(), empty_body());
         let bytes = match http_body_util::Limited::new(body, 1024 * 1024)
             .collect()

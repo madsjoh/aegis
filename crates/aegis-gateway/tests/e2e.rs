@@ -272,14 +272,14 @@ async fn graphql_named_repository_is_allowed_and_denied_by_policy() {
     let authority = Arc::new(Authority::load_or_create(&dir).expect("authority"));
     let ca_pem = authority.ca_pem();
 
-    let upstream_addr = start_upstream(&authority, "api.github.com").await;
+    let upstream_addr = start_upstream(&authority, "localhost").await;
 
     let policy = GithubPolicy::new(vec![CompiledRepoRule {
         pattern: "org/repo".to_string(),
         permissions: BTreeMap::from([(Scope::Contents, Permission::Read)]),
     }]);
     let rule = Rule {
-        hosts: vec!["api.github.com".to_string()],
+        hosts: vec!["localhost".to_string()],
         auth_header: "authorization".to_string(),
         placeholder: PLACEHOLDER.to_string(),
         secret: SECRET.to_string(),
@@ -295,7 +295,7 @@ async fn graphql_named_repository_is_allowed_and_denied_by_policy() {
         Some(Arc::clone(&authority)),
     ));
 
-    let target = format!("api.github.com:{}", upstream_addr.port());
+    let target = format!("localhost:{}", upstream_addr.port());
     let basic = format!(
         "Basic {}",
         STANDARD.encode(format!("x-access-token:{PLACEHOLDER}"))
