@@ -97,7 +97,7 @@ impl From<Box<dyn Error + Send + Sync>> for BoxError {
     }
 }
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
+pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
 
 /// Serve the forward proxy on `addr` until the process exits, trusting only
 /// the platform root store for upstream connections.
@@ -447,7 +447,7 @@ fn absolute_uri(authority: &str, uri: &Uri) -> Result<Uri, BoxError> {
 }
 
 /// The upstream HTTP client, which negotiates the protocol offered over ALPN.
-type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, BoxBody>;
+pub(crate) type UpstreamClient = hyper_util::client::legacy::Client<UpstreamConnector, BoxBody>;
 
 /// The upstream clients, one per supported protocol version, so the upstream
 /// connection matches the request version.
@@ -536,14 +536,14 @@ fn upstream_client(roots: Arc<rustls::RootCertStore>, alpn: &[&[u8]]) -> Upstrea
 /// reports the negotiated ALPN protocol so the client speaks HTTP/2 when the
 /// upstream selects it.
 #[derive(Clone)]
-struct UpstreamConnector {
+pub(crate) struct UpstreamConnector {
     tls: Arc<TlsConnector>,
     #[cfg(test)]
-    address: Option<SocketAddr>,
+    pub(crate) address: Option<SocketAddr>,
 }
 
 impl UpstreamConnector {
-    fn new(tls: Arc<TlsConnector>) -> Self {
+    pub(crate) fn new(tls: Arc<TlsConnector>) -> Self {
         Self {
             tls,
             #[cfg(test)]
@@ -599,7 +599,7 @@ fn upstream_target(uri: &Uri) -> Result<String, std::io::Error> {
 }
 
 /// The upstream transport, which reports the negotiated protocol to the client.
-struct UpstreamIo {
+pub(crate) struct UpstreamIo {
     inner: TokioIo<tokio_rustls::client::TlsStream<TcpStream>>,
     negotiated_h2: bool,
 }
@@ -752,7 +752,7 @@ impl ResolvesServerCert for CertificateResolver {
 
 /// Build the root store for upstream connections from the platform trust store
 /// and an optional extra certificate authority used in tests.
-fn upstream_root_store(extra_ca: Option<&Authority>) -> rustls::RootCertStore {
+pub(crate) fn upstream_root_store(extra_ca: Option<&Authority>) -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
 
     if let Some(authority) = extra_ca {
@@ -771,7 +771,7 @@ fn upstream_root_store(extra_ca: Option<&Authority>) -> rustls::RootCertStore {
 
 /// The TLS connector the gateway uses when encrypting upstream again, offering
 /// the given ALPN protocols.
-fn upstream_tls_connector(roots: Arc<rustls::RootCertStore>, alpn: &[&[u8]]) -> Arc<TlsConnector> {
+pub(crate) fn upstream_tls_connector(roots: Arc<rustls::RootCertStore>, alpn: &[&[u8]]) -> Arc<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
     let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
