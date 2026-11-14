@@ -195,17 +195,26 @@ fn mutation_target(
         .map(|argument| argument.value())
         .ok_or(GraphqlError::Unsupported)?;
 
+    if let Some(name) = input.as_variable() {
+        let object = variables
+            .and_then(|variables| variables.get(name))
+            .ok_or(GraphqlError::Unsupported)?;
+        return target_from_json(object);
+    }
+
     if let Some(value) = find_key(input, "repositoryId") {
         return Ok(RepositoryTarget::NodeId {
             id: resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?,
             kind: NodeKind::Repository,
         });
     }
-    if let Some(value) = find_key(input, "subjectId") {
-        return Ok(RepositoryTarget::NodeId {
-            id: resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?,
-            kind: NodeKind::Subject,
-        });
+    for key in ["subjectId", "pullRequestId", "issueId", "labelableId", "id"] {
+        if let Some(value) = find_key(input, key) {
+            return Ok(RepositoryTarget::NodeId {
+                id: resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?,
+                kind: NodeKind::Subject,
+            });
+        }
     }
     if let Some(value) = find_key(input, "repositoryNameWithOwner") {
         let owner_and_name = resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?;
@@ -218,6 +227,51 @@ fn mutation_target(
         });
     }
     Err(GraphqlError::Unsupported)
+}
+
+fn target_from_json(value: &serde_json::Value) -> Result<RepositoryTarget, GraphqlError> {
+    if let Some(value) = find_json_key(value, "repositoryId") {
+        return Ok(RepositoryTarget::NodeId {
+            id: json_string(value).ok_or(GraphqlError::Unsupported)?,
+            kind: NodeKind::Repository,
+        });
+    }
+    for key in ["subjectId", "pullRequestId", "issueId", "labelableId", "id"] {
+        if let Some(value) = find_json_key(value, key) {
+            return Ok(RepositoryTarget::NodeId {
+                id: json_string(value).ok_or(GraphqlError::Unsupported)?,
+                kind: NodeKind::Subject,
+            });
+        }
+    }
+    if let Some(value) = find_json_key(value, "repositoryNameWithOwner") {
+        let owner_and_name = json_string(value).ok_or(GraphqlError::Unsupported)?;
+        let (owner, name) = owner_and_name
+            .split_once('/')
+            .ok_or(GraphqlError::Unsupported)?;
+        return Ok(RepositoryTarget::Named {
+            owner: owner.to_string(),
+            name: name.to_string(),
+        });
+    }
+    Err(GraphqlError::Unsupported)
+}
+
+fn json_string(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(str::to_string)
+}
+
+fn find_json_key<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(found) = object.get(key) {
+                return Some(found);
+            }
+            object.values().find_map(|value| find_json_key(value, key))
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(|value| find_json_key(value, key)),
+        _ => None,
+    }
 }
 
 fn resolve_string(value: Value<'_>, variables: Option<&serde_json::Value>) -> Option<String> {
@@ -258,7 +312,7 @@ fn query_scope(name: &str) -> Option<Scope> {
         "pullRequests" | "pullRequest" => Some(Scope::PullRequests),
         "issues" | "issue" | "issueComments" => Some(Scope::Issues),
         "object" | "defaultBranchRef" | "refs" | "content" => Some(Scope::Contents),
-        "id" | "name" | "nameWithOwner" | "description" => Some(Scope::Metadata),
+        "id" | "name" | "nameWithOwner" | "description" | "__typename" => Some(Scope::Metadata),
         _ => None,
     }
 }
@@ -432,5 +486,82 @@ mod tests {
             classify("query {", None, None),
             Err(GraphqlError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn mutation_whole_input_variable_is_resolved() {
+        let variables = serde_json::json!({ "input": { "repositoryId": "abc", "title": "t" } });
+        assert_eq!(
+            classify(
+                "mutation($input: CreateIssueInput!) { createIssue(input: $input) { issue { id } } }",
+                Some(&variables),
+                None
+            )
+            .unwrap(),
+            Operation::Scoped(vec![Requirement {
+                access: Access::Write,
+                target: RepositoryTarget::NodeId {
+                    id: "abc".into(),
+                    kind: NodeKind::Repository
+                },
+                scope: ScopeSpec::Fixed(Scope::Issues)
+            }])
+        );
+    }
+
+    #[test]
+    fn mutation_pull_request_id_is_subject() {
+        assert_eq!(
+            classify(
+                "mutation { mergePullRequest(input: { pullRequestId: \"pr1\" }) { clientMutationId } }",
+                None,
+                None
+            )
+            .unwrap(),
+            Operation::Scoped(vec![Requirement {
+                access: Access::Write,
+                target: RepositoryTarget::NodeId {
+                    id: "pr1".into(),
+                    kind: NodeKind::Subject
+                },
+                scope: ScopeSpec::Fixed(Scope::PullRequests)
+            }])
+        );
+    }
+
+    #[test]
+    fn mutation_labelable_id_is_subject() {
+        assert_eq!(
+            classify(
+                "mutation { addLabel(input: { labelableId: \"lab1\", labelIds: [\"l\"] }) { clientMutationId } }",
+                None,
+                None
+            )
+            .unwrap(),
+            Operation::Scoped(vec![Requirement {
+                access: Access::Write,
+                target: RepositoryTarget::NodeId {
+                    id: "lab1".into(),
+                    kind: NodeKind::Subject
+                },
+                scope: ScopeSpec::Subject
+            }])
+        );
+    }
+
+    #[test]
+    fn repository_typename_is_metadata_read() {
+        assert_eq!(
+            classify("query { repository(owner: \"org\", name: \"repo\") { __typename } }", None, None)
+                .unwrap(),
+            Operation::Scoped(vec![Requirement {
+                access: Access::Read,
+                target: RepositoryTarget::Named {
+                    owner: "org".into(),
+                    name: "repo".into()
+                },
+                scope: ScopeSpec::Fixed(Scope::Metadata)
+            }])
+        );
     }
 }
