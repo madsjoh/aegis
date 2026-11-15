@@ -31,7 +31,7 @@ use tower_service::Service;
 
 use aegis_core::ca::Authority;
 use aegis_core::graphql::{classify, Operation, RepositoryTarget, Requirement, ScopeSpec};
-use aegis_core::policy::{Access, Decision, GithubPolicy, Scope};
+use aegis_core::policy::{is_copilot_internal, Access, Decision, GithubPolicy, Scope};
 use aegis_core::token_table::{Rule, TokenTable};
 
 use crate::copilot::{CopilotError, CopilotTokens};
@@ -100,6 +100,10 @@ impl From<Box<dyn Error + Send + Sync>> for BoxError {
 }
 
 pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
+
+pub(crate) const USER_AGENT: &str = "aegis/0.1.0";
+pub(crate) const MAX_JSON_BODY: usize = 64 * 1024;
+const MAX_GRAPHQL_BODY: usize = 1024 * 1024;
 
 /// Serve the forward proxy on `addr` until the process exits, trusting only
 /// the platform root store for upstream connections.
@@ -179,9 +183,14 @@ pub async fn serve_with_extra_ca(
     }
 }
 
+const ENOMEM: i32 = 12;
+const ENFILE: i32 = 23;
+const EMFILE: i32 = 24;
+const ENOBUFS: i32 = 105;
+
 fn is_resource_exhaustion(err: &std::io::Error) -> bool {
     matches!(err.kind(), std::io::ErrorKind::OutOfMemory)
-        || matches!(err.raw_os_error(), Some(12 | 23 | 24 | 105))
+        || matches!(err.raw_os_error(), Some(ENOMEM | ENFILE | EMFILE | ENOBUFS))
 }
 
 /// Handle one client connection: the proxy control channel over plain HTTP.
@@ -240,15 +249,10 @@ async fn handle_connect(
 
     let lowercase_host = host.to_ascii_lowercase();
 
-    let matched = table.matching_rule(&lowercase_host).cloned().or_else(|| {
-        crate::copilot::is_copilot_host(&lowercase_host).then(|| Rule {
-            hosts: vec![lowercase_host.clone()],
-            auth_header: "authorization".to_string(),
-            placeholder: crate::copilot::PLACEHOLDER.to_string(),
-            secret: String::new(),
-            policy: None,
-        })
-    });
+    let matched = table
+        .matching_rule(&lowercase_host)
+        .cloned()
+        .or_else(|| crate::copilot::is_copilot_host(&lowercase_host).then(|| copilot_rule(&lowercase_host)));
     if let Some(rule) = matched {
         let on_upgrade = hyper::upgrade::on(&mut req);
         tokio::spawn(async move {
@@ -324,7 +328,7 @@ async fn mitm(
 
 /// Handle one decrypted request from the client, rewriting and enforcing policy.
 async fn handle_inner_request(
-    mut req: Request<BoxBody>,
+    req: Request<BoxBody>,
     rule: Rule,
     target: String,
     clients: UpstreamClients,
@@ -332,97 +336,148 @@ async fn handle_inner_request(
     let host = authority_host(&target)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let path = req.uri().path();
     if (host == "api.github.com" || host.ends_with(".github.com"))
-        && (path == "/copilot_internal" || path.starts_with("/copilot_internal/"))
+        && is_copilot_internal(req.uri().path())
     {
         return Ok(forbidden());
     }
-    if crate::copilot::is_copilot_host(&host) {
-        let authorization = req
-            .headers()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok());
-        let placeholder = authorization.is_some_and(|value| {
-            rewrite_header(value, crate::copilot::PLACEHOLDER, "validated").is_some()
-        });
-        if placeholder {
-            let Some(tokens) = &clients.copilot else {
-                return Ok(forbidden());
-            };
-            let session = match tokens.session().await {
-                Ok(session) => session,
-                Err(error) => {
-                    tracing::warn!("Copilot authentication failed: {error}");
-                    return Ok(Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(full_body(
-                            "Copilot authentication failed. Check the host gateway log.",
-                        ))
-                        .expect("valid response"));
-                }
-            };
-            set_header(
-                &mut req,
-                "authorization",
-                format!("Bearer {}", session.token),
-            )?;
-            if req
-                .headers()
-                .get("x-api-key")
-                .is_some_and(|value| value == crate::copilot::PLACEHOLDER)
-            {
-                req.headers_mut().remove("x-api-key");
-            }
-            let endpoint: Uri = session.endpoint.parse().map_err(BoxError::from_error)?;
-            let target = endpoint
-                .authority()
-                .expect("validated endpoint")
-                .as_str()
-                .to_string();
-            set_header(&mut req, "host", target.clone())?;
-            return forward_over_tls(req, target, clients).await;
-        }
-    }
+
+    let mut req = match copilot_forward(req, &host, &clients).await? {
+        CopilotForward::Continue(req) => req,
+        CopilotForward::Handled(response) => return Ok(response),
+    };
+
     let Some(rewritten) = rewrite_request_header(&req, &rule) else {
         return forward_over_tls(req, target, clients).await;
     };
 
-    if req.method() == Method::POST && rule.policy.is_some() && path == "/graphql" {
-        let body = std::mem::replace(req.body_mut(), empty_body());
-        let bytes = match http_body_util::Limited::new(body, 1024 * 1024)
-            .collect()
-            .await
+    if req.method() == Method::POST && rule.policy.is_some() && req.uri().path() == "/graphql" {
+        if let Some(response) = enforce_graphql_policy(&mut req, &rule, &clients, &rewritten).await?
         {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => return Ok(forbidden()),
-        };
-        if let Some(policy) = &rule.policy {
-            if graphql_decision(&bytes, policy, &clients.nodes, &rule.secret).await
-                == Decision::Deny
-            {
-                return Ok(forbidden());
-            }
+            return Ok(response);
         }
-        *req.body_mut() = Full::new(bytes).map_err(|never| match never {}).boxed();
-        set_header(&mut req, &rule.auth_header, rewritten)?;
         return forward_over_tls(req, target, clients).await;
     }
 
-    if let Some(policy) = &rule.policy {
-        let path_and_query = req
-            .uri()
-            .path_and_query()
-            .map(|value| value.as_str())
-            .unwrap_or_else(|| req.uri().path());
-        if policy.evaluate(req.method().as_str(), path_and_query) == Decision::Deny {
-            tracing::warn!("policy denied {} {}", req.method(), path_and_query);
-            return Ok(forbidden());
-        }
+    if let Some(response) = enforce_rest_policy(&req, &rule) {
+        return Ok(response);
     }
 
     set_header(&mut req, &rule.auth_header, rewritten)?;
     forward_over_tls(req, target, clients).await
+}
+
+/// The outcome of routing a request through host Copilot authentication.
+enum CopilotForward {
+    /// The request is not a Copilot placeholder request; continue normally.
+    Continue(Request<BoxBody>),
+    /// The request was authenticated and forwarded, or rejected.
+    Handled(Response<BoxBody>),
+}
+
+async fn copilot_forward(
+    mut req: Request<BoxBody>,
+    host: &str,
+    clients: &UpstreamClients,
+) -> Result<CopilotForward, BoxError> {
+    if !crate::copilot::is_copilot_host(host) {
+        return Ok(CopilotForward::Continue(req));
+    }
+    let has_placeholder = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            rewrite_header(value, crate::copilot::PLACEHOLDER, "validated").is_some()
+        });
+    if !has_placeholder {
+        return Ok(CopilotForward::Continue(req));
+    }
+
+    let Some(tokens) = &clients.copilot else {
+        return Ok(CopilotForward::Handled(forbidden()));
+    };
+    let session = match tokens.session().await {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!("Copilot authentication failed: {error}");
+            return Ok(CopilotForward::Handled(
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .body(full_body(
+                        "Copilot authentication failed. Check the host gateway log.",
+                    ))
+                    .expect("valid response"),
+            ));
+        }
+    };
+
+    set_header(&mut req, "authorization", format!("Bearer {}", session.token))?;
+    if req
+        .headers()
+        .get("x-api-key")
+        .is_some_and(|value| value == crate::copilot::PLACEHOLDER)
+    {
+        req.headers_mut().remove("x-api-key");
+    }
+    let endpoint: Uri = session.endpoint.parse().map_err(BoxError::from_error)?;
+    let target = endpoint
+        .authority()
+        .expect("validated endpoint")
+        .as_str()
+        .to_string();
+    set_header(&mut req, "host", target.clone())?;
+
+    let response = forward_over_tls(req, target, (*clients).clone()).await?;
+    Ok(CopilotForward::Handled(response))
+}
+
+async fn enforce_graphql_policy(
+    req: &mut Request<BoxBody>,
+    rule: &Rule,
+    clients: &UpstreamClients,
+    rewritten: &str,
+) -> Result<Option<Response<BoxBody>>, BoxError> {
+    let body = std::mem::replace(req.body_mut(), empty_body());
+    let bytes = match http_body_util::Limited::new(body, MAX_GRAPHQL_BODY)
+        .collect()
+        .await
+    {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Ok(Some(forbidden())),
+    };
+    if let Some(policy) = &rule.policy {
+        if graphql_decision(&bytes, policy, &clients.nodes, &rule.secret).await == Decision::Deny {
+            return Ok(Some(forbidden()));
+        }
+    }
+    *req.body_mut() = Full::new(bytes).map_err(|never| match never {}).boxed();
+    set_header(req, &rule.auth_header, rewritten.to_owned())?;
+    Ok(None)
+}
+
+fn enforce_rest_policy(req: &Request<BoxBody>, rule: &Rule) -> Option<Response<BoxBody>> {
+    let policy = rule.policy.as_ref()?;
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or_else(|| req.uri().path());
+    if policy.evaluate(req.method().as_str(), path_and_query) == Decision::Deny {
+        tracing::warn!("policy denied {} {}", req.method(), path_and_query);
+        return Some(forbidden());
+    }
+    None
+}
+
+fn copilot_rule(host: &str) -> Rule {
+    Rule {
+        hosts: vec![host.to_string()],
+        auth_header: "authorization".to_string(),
+        placeholder: crate::copilot::PLACEHOLDER.to_string(),
+        secret: String::new(),
+        policy: None,
+    }
 }
 
 /// Return the rewritten header value, or `None` when the header is absent or
@@ -594,7 +649,7 @@ async fn host_json_with_clients(
             .method(method)
             .uri(endpoint)
             .header("accept", "application/json")
-            .header("user-agent", "aegis/0.1.0")
+            .header("user-agent", USER_AGENT)
             .header("x-github-api-version", "2025-04-01");
         if let Some(token) = token {
             request = request.header("authorization", format!("Bearer {token}"));
@@ -620,7 +675,7 @@ async fn host_json_with_clients(
         if !response.status().is_success() {
             return Err(CopilotError::Status(response.status().as_u16()));
         }
-        let bytes = http_body_util::Limited::new(response.into_body(), 64 * 1024)
+        let bytes = http_body_util::Limited::new(response.into_body(), MAX_JSON_BODY)
             .collect()
             .await
             .map_err(|_| CopilotError::InvalidResponse)?

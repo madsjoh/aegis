@@ -40,6 +40,11 @@ pub enum Decision {
     Deny,
 }
 
+/// Return whether a path targets the GitHub Copilot internal endpoint.
+pub fn is_copilot_internal(path: &str) -> bool {
+    path == "/copilot_internal" || path.starts_with("/copilot_internal/")
+}
+
 /// A compiled repository rule: a pattern plus the permissions it grants.
 ///
 /// A scope missing from the permissions map is treated as `none`.
@@ -64,7 +69,7 @@ impl GithubPolicy {
     /// Decide whether a request is allowed under this policy.
     pub fn evaluate(&self, method: &str, path_and_query: &str) -> Decision {
         let path = path_and_query.split('?').next().unwrap_or(path_and_query);
-        if path == "/copilot_internal" || path.starts_with("/copilot_internal/") {
+        if is_copilot_internal(path) {
             return Decision::Deny;
         }
 

@@ -23,17 +23,28 @@ pub fn provision_credentials(
         };
         if credential.api_key.is_some() {
             credentials.push(serde_json::json!({
-                "id":format!("cred_aegis_{name}"), "integrationID":name, "label":"API key", "active":true,
-                "value":{"type":"key","key":spec.placeholder}
+                "id": format!("cred_aegis_{name}"),
+                "integrationID": name,
+                "label": "API key",
+                "active": true,
+                "value": { "type": "key", "key": spec.placeholder },
             }));
         }
     }
     if table.copilot().is_some() {
         credentials.push(serde_json::json!({
-            "id":"cred_aegis_copilot", "integrationID":"github-copilot", "label":"GitHub Copilot", "active":true,
-            "value":{"type":"oauth","methodID":"device","access":crate::copilot::PLACEHOLDER,
-                "refresh":crate::copilot::PLACEHOLDER,"expires":0,
-                "metadata":{"apiEndpoint":"https://api.githubcopilot.com"}}
+            "id": "cred_aegis_copilot",
+            "integrationID": "github-copilot",
+            "label": "GitHub Copilot",
+            "active": true,
+            "value": {
+                "type": "oauth",
+                "methodID": "device",
+                "access": crate::copilot::PLACEHOLDER,
+                "refresh": crate::copilot::PLACEHOLDER,
+                "expires": 0,
+                "metadata": { "apiEndpoint": "https://api.githubcopilot.com" },
+            },
         }));
     }
     Ok(credentials)

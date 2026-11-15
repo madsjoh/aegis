@@ -68,7 +68,7 @@ pub fn workspace_id(workspace: &Path) -> String {
 pub fn resolve(workspace: &Path, base: &BaseDirs) -> Paths {
     let id = workspace_id(workspace);
     let mount_tag = format!("ws_{}", &id[..8]);
-    let cid = 3 + u32::from_str_radix(&id[..4], 16).unwrap_or(0) % 1000;
+    let cid = 3 + u32::from_str_radix(&id[..4], 16).expect("workspace id is hex") % 1000;
 
     let config_dir = base.config.join("aegis");
     let data_dir = base.data.join("aegis");

@@ -185,6 +185,14 @@ fn repository_target(
     }
 }
 
+const SUBJECT_ID_KEYS: [&str; 5] = [
+    "subjectId",
+    "pullRequestId",
+    "issueId",
+    "labelableId",
+    "id",
+];
+
 fn mutation_target(
     field: FieldSelection<'_>,
     variables: Option<&serde_json::Value>,
@@ -202,50 +210,33 @@ fn mutation_target(
         return target_from_json(object);
     }
 
-    if let Some(value) = find_key(input, "repositoryId") {
-        return Ok(RepositoryTarget::NodeId {
-            id: resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?,
-            kind: NodeKind::Repository,
-        });
-    }
-    for key in ["subjectId", "pullRequestId", "issueId", "labelableId", "id"] {
-        if let Some(value) = find_key(input, key) {
-            return Ok(RepositoryTarget::NodeId {
-                id: resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?,
-                kind: NodeKind::Subject,
-            });
-        }
-    }
-    if let Some(value) = find_key(input, "repositoryNameWithOwner") {
-        let owner_and_name = resolve_string(value, variables).ok_or(GraphqlError::Unsupported)?;
-        let (owner, name) = owner_and_name
-            .split_once('/')
-            .ok_or(GraphqlError::Unsupported)?;
-        return Ok(RepositoryTarget::Named {
-            owner: owner.to_string(),
-            name: name.to_string(),
-        });
-    }
-    Err(GraphqlError::Unsupported)
+    repository_target_from(|key| {
+        find_key(input, key).and_then(|value| resolve_string(value, variables))
+    })
 }
 
 fn target_from_json(value: &serde_json::Value) -> Result<RepositoryTarget, GraphqlError> {
-    if let Some(value) = find_json_key(value, "repositoryId") {
+    repository_target_from(|key| find_json_key(value, key).and_then(json_string))
+}
+
+fn repository_target_from(
+    mut resolve: impl FnMut(&str) -> Option<String>,
+) -> Result<RepositoryTarget, GraphqlError> {
+    if let Some(id) = resolve("repositoryId") {
         return Ok(RepositoryTarget::NodeId {
-            id: json_string(value).ok_or(GraphqlError::Unsupported)?,
+            id,
             kind: NodeKind::Repository,
         });
     }
-    for key in ["subjectId", "pullRequestId", "issueId", "labelableId", "id"] {
-        if let Some(value) = find_json_key(value, key) {
+    for key in SUBJECT_ID_KEYS {
+        if let Some(id) = resolve(key) {
             return Ok(RepositoryTarget::NodeId {
-                id: json_string(value).ok_or(GraphqlError::Unsupported)?,
+                id,
                 kind: NodeKind::Subject,
             });
         }
     }
-    if let Some(value) = find_json_key(value, "repositoryNameWithOwner") {
-        let owner_and_name = json_string(value).ok_or(GraphqlError::Unsupported)?;
+    if let Some(owner_and_name) = resolve("repositoryNameWithOwner") {
         let (owner, name) = owner_and_name
             .split_once('/')
             .ok_or(GraphqlError::Unsupported)?;

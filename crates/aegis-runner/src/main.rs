@@ -321,63 +321,14 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
     let vm = config::read_vm(&p.config_dir).map_err(|e| RunnerError::Other(e.to_string()))?;
     let skills = config::read_skills(&p.config_dir).map_err(|e| RunnerError::Other(e.to_string()))?;
 
-    ssh_key::ensure_ssh_key(&p.ssh_key).map_err(|e| RunnerError::Other(e.to_string()))?;
-    let public_key = std::fs::read_to_string(ssh_pub_path(&p.ssh_key))
-        .map_err(|e| RunnerError::Other(e.to_string()))?
-        .trim_end()
-        .to_string();
-    let ssh_dir = p.config_dir.join("ssh");
-    std::fs::create_dir_all(&ssh_dir).map_err(|e| RunnerError::Other(e.to_string()))?;
-    std::fs::write(ssh_dir.join("authorized_keys"), format!("{public_key}\n"))
-        .map_err(|e| RunnerError::Other(e.to_string()))?;
+    install_ssh_key(&p)?;
 
     let secrets_file = p.config_dir.join("secrets.yaml");
     let gateway_enabled = secrets_file.exists();
     let age_key_file = base.config.join("sops/age/keys.txt");
-    let mut gateway_path = None;
-    if gateway_enabled {
-        println!("Provisioning the gateway CA...");
-        let path = nix_build(&format!("{FLAKE_REF}#aegis-gateway"), &[])?;
-        let gateway_bin = format!("{path}/bin/aegis-gateway");
-        let mut command = Command::new(&gateway_bin);
-        command
-            .args(["ensure-ca", "--ca-dir"])
-            .arg(p.data_dir.join("ca"))
-            .args(["--cert-out"])
-            .arg(p.config_dir.join("ca.crt"));
-        run_checked(command)?;
+    let gateway_path = provision_gateway(gateway_enabled, &p, &secrets_file, &age_key_file)?;
 
-        let mut command = Command::new(&gateway_bin);
-        command
-            .args(["login-copilot", "--secrets"])
-            .arg(&secrets_file)
-            .arg("--age-key")
-            .arg(&age_key_file);
-        run_checked(command)?;
-
-        let mut command = Command::new(&gateway_bin);
-        command
-            .args(["provision-auth", "--secrets"])
-            .arg(&secrets_file)
-            .args(["--age-key"])
-            .arg(&age_key_file)
-            .args(["--out"])
-            .arg(p.opencode_share_dir.join("credentials.json"));
-        run_checked(command)?;
-        gateway_path = Some(path);
-    }
-
-    let gitconfig_dir = p.run_dir.join("gitconfig");
-    std::fs::create_dir_all(&gitconfig_dir).map_err(|e| RunnerError::Other(e.to_string()))?;
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let home_gitconfig = home.join(".gitconfig");
-    if home_gitconfig.is_file() {
-        std::fs::copy(&home_gitconfig, gitconfig_dir.join(".gitconfig"))
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
-    } else {
-        std::fs::write(gitconfig_dir.join(".gitconfig"), "[user]\n")
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
-    }
+    prepare_gitconfig(&p)?;
 
     let runtime = env::Runtime {
         workspace: workspace.clone(),
@@ -405,93 +356,221 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
     };
 
     let mut children = Children::new();
+    if !is_darwin() {
+        start_virtiofsds(&mut children, &p, &workspace)?;
+    }
+    if let Some(gateway) = &gateway_path {
+        start_gateway(&mut children, &p, gateway, &secrets_file, &age_key_file)?;
+    }
+
+    let image_lock = boot_vm(
+        &mut children,
+        &p,
+        &vm,
+        &vm_path,
+        &build_env,
+        reg_info.as_deref(),
+        forwarded,
+    )?;
+    if is_darwin() {
+        publish_guest_images(&mut children, &p, image_lock)?;
+    }
+
+    let (ssh_target, probe_target) = guest_ssh_targets(&p);
+    println!("Waiting for the guest SSH server...");
+    let probe_refs: Vec<&str> = probe_target.iter().map(String::as_str).collect();
+    let vm_child = children.vm.as_mut().expect("vm spawned");
+    process::wait_for_ssh(vm_child, &probe_refs, &p.ssh_key, &p.run_dir.join("vm.log"))
+        .map_err(process_to_runner)?;
+
+    if gateway_enabled {
+        start_reverse_tunnel(&mut children, &p, &ssh_target)?;
+    }
+
+    attach_to_guest(&mut children, &p, &ssh_target)
+}
+
+fn install_ssh_key(p: &paths::Paths) -> Result<(), RunnerError> {
+    ssh_key::ensure_ssh_key(&p.ssh_key).map_err(|e| RunnerError::Other(e.to_string()))?;
+    let public_key = std::fs::read_to_string(ssh_pub_path(&p.ssh_key))
+        .map_err(|e| RunnerError::Other(e.to_string()))?
+        .trim_end()
+        .to_string();
+    let ssh_dir = p.config_dir.join("ssh");
+    std::fs::create_dir_all(&ssh_dir).map_err(|e| RunnerError::Other(e.to_string()))?;
+    std::fs::write(ssh_dir.join("authorized_keys"), format!("{public_key}\n"))
+        .map_err(|e| RunnerError::Other(e.to_string()))
+}
+
+fn provision_gateway(
+    enabled: bool,
+    p: &paths::Paths,
+    secrets_file: &Path,
+    age_key_file: &Path,
+) -> Result<Option<String>, RunnerError> {
+    if !enabled {
+        return Ok(None);
+    }
+
+    println!("Provisioning the gateway CA...");
+    let path = nix_build(&format!("{FLAKE_REF}#aegis-gateway"), &[])?;
+    let gateway_bin = format!("{path}/bin/aegis-gateway");
+
+    let mut command = Command::new(&gateway_bin);
+    command
+        .args(["ensure-ca", "--ca-dir"])
+        .arg(p.data_dir.join("ca"))
+        .args(["--cert-out"])
+        .arg(p.config_dir.join("ca.crt"));
+    run_checked(command)?;
+
+    let mut command = Command::new(&gateway_bin);
+    command
+        .args(["login-copilot", "--secrets"])
+        .arg(secrets_file)
+        .arg("--age-key")
+        .arg(age_key_file);
+    run_checked(command)?;
+
+    let mut command = Command::new(&gateway_bin);
+    command
+        .args(["provision-auth", "--secrets"])
+        .arg(secrets_file)
+        .args(["--age-key"])
+        .arg(age_key_file)
+        .args(["--out"])
+        .arg(p.opencode_share_dir.join("credentials.json"));
+    run_checked(command)?;
+
+    Ok(Some(path))
+}
+
+fn prepare_gitconfig(p: &paths::Paths) -> Result<(), RunnerError> {
+    let gitconfig_dir = p.run_dir.join("gitconfig");
+    std::fs::create_dir_all(&gitconfig_dir).map_err(|e| RunnerError::Other(e.to_string()))?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home_gitconfig = home.join(".gitconfig");
+    if home_gitconfig.is_file() {
+        std::fs::copy(&home_gitconfig, gitconfig_dir.join(".gitconfig"))
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+    } else {
+        std::fs::write(gitconfig_dir.join(".gitconfig"), "[user]\n")
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+    }
+    Ok(())
+}
+
+fn start_virtiofsds(
+    children: &mut Children,
+    p: &paths::Paths,
+    workspace: &Path,
+) -> Result<(), RunnerError> {
+    println!("Starting the virtiofs daemons...");
+    let specs = [
+        (p.run_dir.join("workspace.sock"), workspace.to_owned(), false),
+        (p.run_dir.join("config.sock"), p.config_dir.clone(), true),
+        (
+            p.run_dir.join("opencode-state.sock"),
+            p.opencode_state_dir.clone(),
+            false,
+        ),
+        (
+            p.run_dir.join("opencode-share.sock"),
+            p.opencode_share_dir.clone(),
+            false,
+        ),
+        (
+            p.run_dir.join("gitconfig.sock"),
+            p.run_dir.join("gitconfig"),
+            true,
+        ),
+    ];
 
     let mut virtiofsd_sockets = Vec::new();
-    if !is_darwin() {
-        println!("Starting the virtiofs daemons...");
-        let specs = [
-            (p.run_dir.join("workspace.sock"), workspace.clone(), false),
-            (p.run_dir.join("config.sock"), p.config_dir.clone(), true),
-            (
-                p.run_dir.join("opencode-state.sock"),
-                p.opencode_state_dir.clone(),
-                false,
-            ),
-            (
-                p.run_dir.join("opencode-share.sock"),
-                p.opencode_share_dir.clone(),
-                false,
-            ),
-            (p.run_dir.join("gitconfig.sock"), gitconfig_dir.clone(), true),
-        ];
-        for (socket, _dir, _readonly) in &specs {
-            let _ = std::fs::remove_file(socket);
-            virtiofsd_sockets.push(socket.clone());
-        }
-        for (socket, dir, readonly) in &specs {
-            let log = p.run_dir.join(format!(
-                "virtiofsd-{}.log",
-                socket.file_name().unwrap().to_string_lossy()
-            ));
-            let _ = std::fs::write(&log, "");
-            let child = start_virtiofsd(socket, dir, &log, *readonly, host_uid(), host_gid())
-                .map_err(|e| RunnerError::Other(e.to_string()))?;
-            children.virtiofsd.push(child);
-        }
-
-        let mut ready = false;
-        for _ in 0..50 {
-            if let Some(signal) = signal::take() {
-                return Err(RunnerError::Interrupted(signal));
-            }
-            ready = virtiofsd_sockets.iter().all(|socket| socket_exists(socket));
-            if ready {
-                break;
-            }
-            for child in &mut children.virtiofsd {
-                if child.try_wait().map_err(|e| RunnerError::Other(e.to_string()))?.is_some() {
-                    dump_virtiofsd_logs(&p.run_dir);
-                    return Err(RunnerError::Other(
-                        "A virtiofs daemon exited before becoming ready.".to_string(),
-                    ));
-                }
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        if !ready {
-            dump_virtiofsd_logs(&p.run_dir);
-            return Err(RunnerError::Other(
-                "Timed out waiting for the virtiofs daemons.".to_string(),
-            ));
-        }
+    for (socket, _dir, _readonly) in &specs {
+        let _ = std::fs::remove_file(socket);
+        virtiofsd_sockets.push(socket.clone());
     }
-
-    if let Some(gateway) = &gateway_path {
-        println!("Starting the gateway proxy...");
-        let gateway_log = p.run_dir.join("gateway.log");
-        let _ = std::fs::write(&gateway_log, "");
-        let mut command = Command::new(format!("{gateway}/bin/aegis-gateway"));
-        command
-            .args(["serve", "--listen"])
-            .arg(format!("127.0.0.1:{}", p.proxy_host_port))
-            .args(["--ca-dir"])
-            .arg(p.data_dir.join("ca"))
-            .args(["--secrets"])
-            .arg(&secrets_file)
-            .args(["--age-key"])
-            .arg(&age_key_file);
-        let child = process::spawn_logged(command, &gateway_log)
+    for (socket, dir, readonly) in &specs {
+        let log = p.run_dir.join(format!(
+            "virtiofsd-{}.log",
+            socket.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::write(&log, "");
+        let child = start_virtiofsd(socket, dir, &log, *readonly, host_uid(), host_gid())
             .map_err(|e| RunnerError::Other(e.to_string()))?;
-        children.gateway = Some(child);
-        process::wait_for_log(
-            children.gateway.as_mut().unwrap(),
-            &gateway_log,
-            "listening on",
-            SSH_WAIT_TIMEOUT,
-        )
-        .map_err(process_to_runner)?;
+        children.virtiofsd.push(child);
     }
 
+    let mut ready = false;
+    for _ in 0..50 {
+        if let Some(signal) = signal::take() {
+            return Err(RunnerError::Interrupted(signal));
+        }
+        ready = virtiofsd_sockets.iter().all(|socket| socket_exists(socket));
+        if ready {
+            break;
+        }
+        for child in &mut children.virtiofsd {
+            if child.try_wait().map_err(|e| RunnerError::Other(e.to_string()))?.is_some() {
+                dump_virtiofsd_logs(&p.run_dir);
+                return Err(RunnerError::Other(
+                    "A virtiofs daemon exited before becoming ready.".to_string(),
+                ));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if !ready {
+        dump_virtiofsd_logs(&p.run_dir);
+        return Err(RunnerError::Other(
+            "Timed out waiting for the virtiofs daemons.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn start_gateway(
+    children: &mut Children,
+    p: &paths::Paths,
+    gateway_path: &str,
+    secrets_file: &Path,
+    age_key_file: &Path,
+) -> Result<(), RunnerError> {
+    println!("Starting the gateway proxy...");
+    let gateway_log = p.run_dir.join("gateway.log");
+    let _ = std::fs::write(&gateway_log, "");
+    let mut command = Command::new(format!("{gateway_path}/bin/aegis-gateway"));
+    command
+        .args(["serve", "--listen"])
+        .arg(format!("127.0.0.1:{}", p.proxy_host_port))
+        .args(["--ca-dir"])
+        .arg(p.data_dir.join("ca"))
+        .args(["--secrets"])
+        .arg(secrets_file)
+        .args(["--age-key"])
+        .arg(age_key_file);
+    let child = process::spawn_logged(command, &gateway_log)
+        .map_err(|e| RunnerError::Other(e.to_string()))?;
+    children.gateway = Some(child);
+    process::wait_for_log(
+        children.gateway.as_mut().unwrap(),
+        &gateway_log,
+        "listening on",
+        SSH_WAIT_TIMEOUT,
+    )
+    .map_err(process_to_runner)
+}
+
+fn boot_vm(
+    children: &mut Children,
+    p: &paths::Paths,
+    vm: &config::VmConfig,
+    vm_path: &str,
+    build_env: &[(String, String)],
+    reg_info: Option<&str>,
+    forwarded: &[String],
+) -> Result<Option<FileLock>, RunnerError> {
     let vm_log = p.run_dir.join("vm.log");
     let _ = std::fs::write(&vm_log, "");
 
@@ -504,7 +583,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         store_cache::link_shared_store_images(&p.state_dir, &p.cache_dir)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         let mut command = Command::new(&vm_command_path);
-        apply_env(&mut command, &build_env);
+        apply_env(&mut command, build_env);
         command.env("VZVM_STATE_DIR", &p.state_dir);
         command.args(forwarded);
         let child = process::spawn_logged(command, &vm_log)
@@ -512,12 +591,12 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         children.vm = Some(child);
     } else {
         let mut command = Command::new(&vm_command_path);
-        apply_env(&mut command, &build_env);
+        apply_env(&mut command, build_env);
         command.env(
             "QEMU_KERNEL_PARAMS",
             format!(
                 "regInfo=/nix/.ro-store/{}/registration",
-                reg_info.as_deref().unwrap_or_default()
+                reg_info.unwrap_or_default()
             ),
         );
         command.env(
@@ -534,76 +613,90 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         children.vm = Some(child);
     }
 
-    if is_darwin() {
-        let vm_child = children.vm.as_mut().expect("vm spawned");
-        store_cache::wait_for_guest_start(vm_child, &vm_log)
-            .map_err(guest_start_to_runner)?;
-        store_cache::publish_store_images(&p.state_dir, &p.cache_dir)
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
-        // The lock must cover publication so two runners sharing one cache
-        // directory cannot race the rename and symlink of store images.
-        drop(image_lock.take());
-    }
+    Ok(image_lock)
+}
 
-    let ssh_target = if is_darwin() {
-        vec![
-            "-p".to_string(),
-            p.ssh_port.to_string(),
-            "agent@127.0.0.1".to_string(),
-        ]
-    } else {
-        vec![format!("agent@vsock/{}", p.cid)]
-    };
-    let probe_target = if is_darwin() {
-        vec![
-            "-p".to_string(),
-            p.ssh_port.to_string(),
-            "root@127.0.0.1".to_string(),
-        ]
-    } else {
-        vec![format!("root@vsock/{}", p.cid)]
-    };
-
-    println!("Waiting for the guest SSH server...");
-    let probe_refs: Vec<&str> = probe_target.iter().map(String::as_str).collect();
+fn publish_guest_images(
+    children: &mut Children,
+    p: &paths::Paths,
+    image_lock: Option<FileLock>,
+) -> Result<(), RunnerError> {
     let vm_child = children.vm.as_mut().expect("vm spawned");
-    process::wait_for_ssh(vm_child, &probe_refs, &p.ssh_key, &vm_log)
-        .map_err(process_to_runner)?;
+    store_cache::wait_for_guest_start(vm_child, &p.run_dir.join("vm.log"))
+        .map_err(guest_start_to_runner)?;
+    store_cache::publish_store_images(&p.state_dir, &p.cache_dir)
+        .map_err(|e| RunnerError::Other(e.to_string()))?;
+    // The lock must cover publication so two runners sharing one cache
+    // directory cannot race the rename and symlink of store images.
+    drop(image_lock);
+    Ok(())
+}
 
-    if gateway_enabled {
-        let tunnel_log = p.run_dir.join("reverse-tunnel.log");
-        let _ = std::fs::write(&tunnel_log, "");
-        let mut command = Command::new("ssh");
-        command
-            .arg("-v")
-            .arg("-N")
-            .arg("-o")
-            .arg("ExitOnForwardFailure=yes")
-            .arg("-R")
-            .arg(format!("3128:127.0.0.1:{}", p.proxy_host_port))
-            .arg("-i")
-            .arg(&p.ssh_key)
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
-            .arg("-o")
-            .arg("ConnectTimeout=2")
-            .arg("-o")
-            .arg("BatchMode=yes");
-        command.args(&ssh_target);
-        let child = process::spawn_logged(command, &tunnel_log)
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
-        children.tunnel = Some(child);
-        process::wait_for_log(
-            children.tunnel.as_mut().unwrap(),
-            &tunnel_log,
-            "remote forward success",
-            SSH_WAIT_TIMEOUT,
+fn guest_ssh_targets(p: &paths::Paths) -> (Vec<String>, Vec<String>) {
+    if is_darwin() {
+        (
+            vec![
+                "-p".to_string(),
+                p.ssh_port.to_string(),
+                "agent@127.0.0.1".to_string(),
+            ],
+            vec![
+                "-p".to_string(),
+                p.ssh_port.to_string(),
+                "root@127.0.0.1".to_string(),
+            ],
         )
-        .map_err(process_to_runner)?;
+    } else {
+        (
+            vec![format!("agent@vsock/{}", p.cid)],
+            vec![format!("root@vsock/{}", p.cid)],
+        )
     }
+}
 
+fn start_reverse_tunnel(
+    children: &mut Children,
+    p: &paths::Paths,
+    ssh_target: &[String],
+) -> Result<(), RunnerError> {
+    let tunnel_log = p.run_dir.join("reverse-tunnel.log");
+    let _ = std::fs::write(&tunnel_log, "");
+    let mut command = Command::new("ssh");
+    command
+        .arg("-v")
+        .arg("-N")
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-R")
+        .arg(format!("3128:127.0.0.1:{}", p.proxy_host_port))
+        .arg("-i")
+        .arg(&p.ssh_key)
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=2")
+        .arg("-o")
+        .arg("BatchMode=yes");
+    command.args(ssh_target);
+    let child = process::spawn_logged(command, &tunnel_log)
+        .map_err(|e| RunnerError::Other(e.to_string()))?;
+    children.tunnel = Some(child);
+    process::wait_for_log(
+        children.tunnel.as_mut().unwrap(),
+        &tunnel_log,
+        "remote forward success",
+        SSH_WAIT_TIMEOUT,
+    )
+    .map_err(process_to_runner)
+}
+
+fn attach_to_guest(
+    children: &mut Children,
+    p: &paths::Paths,
+    ssh_target: &[String],
+) -> Result<ExitCode, RunnerError> {
     let mut attach = Command::new("ssh");
     attach
         .arg("-tt")
@@ -615,7 +708,7 @@ fn orchestrate(forwarded: &[String]) -> Result<ExitCode, RunnerError> {
         .arg("UserKnownHostsFile=/dev/null")
         .arg("-o")
         .arg("LogLevel=ERROR")
-        .args(&ssh_target)
+        .args(ssh_target)
         .arg("exec /run/current-system/sw/bin/opencode-shell")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

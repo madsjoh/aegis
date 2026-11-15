@@ -166,76 +166,85 @@ pub fn update_copilot_oauth(
             .unwrap_or_default()
             .as_nanos()
     ));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(SecretsError::Update)?;
-        file.write_all(&original).map_err(SecretsError::Update)?;
-        let index = format!(
-            "[\"github\"][{}][\"copilot_oauth_token\"]",
-            serde_json::to_string(credential).unwrap()
-        );
-        let mut child = Command::new("sops")
-            .args([
-                "set",
-                "--value-stdin",
-                "--input-type",
-                "yaml",
-                "--output-type",
-                "yaml",
-            ])
-            .arg(&temporary)
-            .arg(index)
-            .env("SOPS_AGE_KEY", age_key(age)?)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(SecretsError::RunSops)?;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(&serde_json::to_vec(token).unwrap())
-            .map_err(SecretsError::Update)?;
-        let output = child.wait_with_output().map_err(SecretsError::RunSops)?;
-        if !output.status.success() {
-            return Err(SecretsError::Sops {
-                status: output.status,
-                stderr: "SOPS could not save the OAuth credential".to_string(),
-            });
-        }
-        let mut expected = decrypt_document(path, age)?;
-        let credential_document = expected
-            .get_mut("github")
-            .and_then(|credentials| credentials.get_mut(credential))
-            .and_then(|credential| credential.as_object_mut())
-            .ok_or_else(|| {
-                SecretsError::Update(std::io::Error::other("GitHub credential not found"))
-            })?;
-        credential_document.insert(
-            "copilot_oauth_token".to_string(),
-            serde_json::Value::String(token.to_string()),
-        );
-        let updated = decrypt_document(&temporary, age)?;
-        let ciphertext = std::fs::read_to_string(&temporary).map_err(SecretsError::Update)?;
-        if updated != expected || token.is_empty() || ciphertext.contains(token) {
-            return Err(SecretsError::Update(std::io::Error::other(
-                "OAuth update verification failed",
-            )));
-        }
-        if std::fs::read(path).map_err(SecretsError::Update)? != original {
-            return Err(SecretsError::Update(std::io::Error::other(
-                "secrets changed during OAuth update; retry login",
-            )));
-        }
-        std::fs::rename(&temporary, path).map_err(SecretsError::Update)
-    })();
+    let result = rewrite_copilot_oauth(path, age, credential, token, &temporary, &original);
     let _ = std::fs::remove_file(temporary);
     result
+}
+
+fn rewrite_copilot_oauth(
+    path: &Path,
+    age: &AgeSource,
+    credential: &str,
+    token: &str,
+    temporary: &Path,
+    original: &[u8],
+) -> Result<(), SecretsError> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temporary)
+        .map_err(SecretsError::Update)?;
+    file.write_all(original).map_err(SecretsError::Update)?;
+    let index = format!(
+        "[\"github\"][{}][\"copilot_oauth_token\"]",
+        serde_json::to_string(credential).unwrap()
+    );
+    let mut child = Command::new("sops")
+        .args([
+            "set",
+            "--value-stdin",
+            "--input-type",
+            "yaml",
+            "--output-type",
+            "yaml",
+        ])
+        .arg(temporary)
+        .arg(index)
+        .env("SOPS_AGE_KEY", age_key(age)?)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(SecretsError::RunSops)?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(token).unwrap())
+        .map_err(SecretsError::Update)?;
+    let output = child.wait_with_output().map_err(SecretsError::RunSops)?;
+    if !output.status.success() {
+        return Err(SecretsError::Sops {
+            status: output.status,
+            stderr: "SOPS could not save the OAuth credential".to_string(),
+        });
+    }
+    let mut expected = decrypt_document(path, age)?;
+    let credential_document = expected
+        .get_mut("github")
+        .and_then(|credentials| credentials.get_mut(credential))
+        .and_then(|credential| credential.as_object_mut())
+        .ok_or_else(|| {
+            SecretsError::Update(std::io::Error::other("GitHub credential not found"))
+        })?;
+    credential_document.insert(
+        "copilot_oauth_token".to_string(),
+        serde_json::Value::String(token.to_string()),
+    );
+    let updated = decrypt_document(temporary, age)?;
+    let ciphertext = std::fs::read_to_string(temporary).map_err(SecretsError::Update)?;
+    if updated != expected || token.is_empty() || ciphertext.contains(token) {
+        return Err(SecretsError::Update(std::io::Error::other(
+            "OAuth update verification failed",
+        )));
+    }
+    if std::fs::read(path).map_err(SecretsError::Update)?.as_slice() != original {
+        return Err(SecretsError::Update(std::io::Error::other(
+            "secrets changed during OAuth update; retry login",
+        )));
+    }
+    std::fs::rename(temporary, path).map_err(SecretsError::Update)
 }
 
 #[cfg(test)]

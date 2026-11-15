@@ -20,7 +20,8 @@
   outputs = { self, nixpkgs, crane, home-manager, metis }:
     let
       aegis = import ./helpers { inherit nixpkgs home-manager metis; };
-      flakeRef = if (self.rev or "") != "" then "github:madsjoh/aegis/${self.rev}" else "path:${self.outPath}";
+      # Reference the local source so local runs do not require a pushed commit.
+      flakeRef = "path:${self.outPath}";
       systemModule = { pkgs, ... }: {
         environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
       };

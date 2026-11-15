@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use aegis_core::graphql::NodeKind;
 
-use crate::proxy::{BoxBody, UpstreamClient};
+use crate::proxy::{BoxBody, UpstreamClient, MAX_JSON_BODY, USER_AGENT};
 
 /// The kind of subject a subject node references.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +127,7 @@ impl NodeResolver {
             .uri("https://api.github.com/graphql")
             .header("authorization", format!("Bearer {token}"))
             .header("accept", "application/json")
-            .header("user-agent", "aegis/0.1.0")
+            .header("user-agent", USER_AGENT)
             .header("content-type", "application/json")
             .body(full_body(body))
             .map_err(|error| NodeResolutionError::Transport(error.to_string()))?;
@@ -145,7 +145,7 @@ impl NodeResolver {
             )));
         }
 
-        let bytes = http_body_util::Limited::new(response.into_body(), 64 * 1024)
+        let bytes = http_body_util::Limited::new(response.into_body(), MAX_JSON_BODY)
             .collect()
             .await
             .map_err(|error| NodeResolutionError::Transport(error.to_string()))?
