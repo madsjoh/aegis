@@ -108,7 +108,7 @@ pub fn wait_for_ssh(
         }
 
         failed_probes += 1;
-        if failed_probes % 150 == 0 {
+        if failed_probes.is_multiple_of(150) {
             println!("Still waiting for the guest SSH server...");
         }
         std::thread::sleep(Duration::from_millis(200));
