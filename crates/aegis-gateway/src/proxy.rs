@@ -31,7 +31,7 @@ use tower_service::Service;
 
 use aegis_core::ca::Authority;
 use aegis_core::graphql::{classify, Operation, RepositoryTarget, Requirement, ScopeSpec};
-use aegis_core::policy::{Access, Decision, GithubPolicy, Scope};
+use aegis_core::policy::{is_copilot_internal, Access, Decision, GithubPolicy, Scope};
 use aegis_core::token_table::{Rule, TokenTable};
 
 use crate::copilot::{CopilotError, CopilotTokens};
@@ -100,6 +100,10 @@ impl From<Box<dyn Error + Send + Sync>> for BoxError {
 }
 
 pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, BoxError>;
+
+pub(crate) const USER_AGENT: &str = "aegis/0.1.0";
+pub(crate) const MAX_JSON_BODY: usize = 64 * 1024;
+const MAX_GRAPHQL_BODY: usize = 1024 * 1024;
 
 /// Serve the forward proxy on `addr` until the process exits, trusting only
 /// the platform root store for upstream connections.
@@ -333,8 +337,7 @@ async fn handle_inner_request(
         .unwrap_or_default()
         .to_ascii_lowercase();
     if (host == "api.github.com" || host.ends_with(".github.com"))
-        && (req.uri().path() == "/copilot_internal"
-            || req.uri().path().starts_with("/copilot_internal/"))
+        && is_copilot_internal(req.uri().path())
     {
         return Ok(forbidden());
     }
@@ -436,7 +439,7 @@ async fn enforce_graphql_policy(
     rewritten: &str,
 ) -> Result<Option<Response<BoxBody>>, BoxError> {
     let body = std::mem::replace(req.body_mut(), empty_body());
-    let bytes = match http_body_util::Limited::new(body, 1024 * 1024)
+    let bytes = match http_body_util::Limited::new(body, MAX_GRAPHQL_BODY)
         .collect()
         .await
     {
@@ -646,7 +649,7 @@ async fn host_json_with_clients(
             .method(method)
             .uri(endpoint)
             .header("accept", "application/json")
-            .header("user-agent", "aegis/0.1.0")
+            .header("user-agent", USER_AGENT)
             .header("x-github-api-version", "2025-04-01");
         if let Some(token) = token {
             request = request.header("authorization", format!("Bearer {token}"));
@@ -672,7 +675,7 @@ async fn host_json_with_clients(
         if !response.status().is_success() {
             return Err(CopilotError::Status(response.status().as_u16()));
         }
-        let bytes = http_body_util::Limited::new(response.into_body(), 64 * 1024)
+        let bytes = http_body_util::Limited::new(response.into_body(), MAX_JSON_BODY)
             .collect()
             .await
             .map_err(|_| CopilotError::InvalidResponse)?
